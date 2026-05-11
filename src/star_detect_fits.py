@@ -6,13 +6,13 @@ from astropy.io import fits
 
 def read_fits_to_cv2(fits_path):
     """
-    读取天文 FITS 文件，并将其归一化为 OpenCV 可处理的 8 位灰度图
+    读取FITS文件,归一化为OpenCV可处理的8位灰度图
     """
     try:
         # 读取图像数据矩阵和头部元数据
         data, header = fits.getdata(fits_path, header=True)
     except Exception as e:
-        print(f"❌ FITS 读取失败，请检查路径或文件损坏: {e}")
+        print(f"error: FITS 读取失败，请检查路径或文件损坏: {e}")
         return None, None
 
     # 异常值剔除：排除 1% 最暗噪点和 99.9% 极亮噪点（如宇宙射线）
@@ -109,7 +109,7 @@ def process_star_map(fits_path, output_dir, file_name):
     cv2.putText(display_img, f"Total Stars Found: {total_stars}", (20, 40), 
                 cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
 
-    # 7. 提取创新加分项：FITS 头部元数据
+    # 7. 提取FITS头部元数据
     # 尝试读取曝光时间、观测日期等关键物理信息，若无则为空
     extracted_meta = {
         "exposure_time": header.get("EXPTIME", "N/A"),
