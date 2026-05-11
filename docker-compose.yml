@@ -1,0 +1,16 @@
+version: '3.8' #向下兼容
+
+services:
+  cv-gpu:
+    build: .
+    image: opencv_gpu_env:v1
+    container_name: opencv_gpu_env
+    volumes:
+      - .:/workspace
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
