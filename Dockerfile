@@ -21,5 +21,6 @@ RUN ln -s /usr/bin/python3 /usr/bin/python
 RUN pip install --upgrade pip && \
     pip install opencv-python numpy torch torchvision
 # 安装其他常用的科学计算和绘图库
-RUN pip install astropy matplotlib 
+RUN pip install astropy matplotlib
+RUN pip install photutils scipy 
 CMD ["tail", "-f", "/dev/null"]

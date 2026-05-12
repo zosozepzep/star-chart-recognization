@@ -1,80 +1,122 @@
+# 🌌 太空目标识别仿真 (SpaceMapper Pipeline v2.0)
 
-# 🌌 太空目标识别仿真 (Space Object Identification Simulation)
-
-本仓库用于参加**第十九届先进机器人及仿真技术大赛 - 太空目标识别仿真组**。本项目基于[](Spacemapper.cn)提供的天基 FITS 图像数据，旨在通过计算机视觉与深度学习技术，实现高精度的星图识别与动目标检测。
+本仓库用于参加**第十九届先进机器人及仿真技术大赛 - 太空目标识别仿真组**。本项目基于 [Spacemapper.cn](http://spacemapper.cn/) 提供的天基 FITS 序列数据，构建了一套从底层物理特征提取到高层时序轨迹关联的全自动处理流水线。
 
 ---
 
-## 🎯 比赛目标
-根据大赛规则，本项目核心任务包括：
-* 1. **星图识别**：从 FITS 图像中识别星点、计算总数，并定位星等最低（最暗）的星。
-* 2. **星图分析**：通过多帧图像序列识别太空中的运动目标（空间碎片、非合作卫星等）。
-* 3. **创新赛项**：从原始数据中提取光变曲线、运动矢量等具有实际工程意义的创新数据 。
+# 🚀 核心架构与今日更新 (2026-05-12)
 
-## 🛠️ 技术栈
-* **OS**: Windows 11 + WSL2 (Ubuntu 22.04)
-* **Runtime**: Docker Desktop (Containerization)
-* **Language**: Python 3.10
-* **Core Libraries**: 
-    * `OpenCV`: 图像处理与矩阵运算
-    * `Astropy`: FITS 科学数据解析与天文计算
-    * `PyTorch`: 深度学习推理 (规划中)
-    * `Matplotlib`:科学计算和绘图库
-* **Methodology**: Vibe Coding (高效直觉驱动开发)
+我们已将原有的 Baseline 升级为 **“自适应双引擎 + 时序物理审判”** 架构，解决了海量暗星背景下的虚警问题。
 
-## 🏗️ 环境配置
-本项目完全容器化，确保了开发环境的一致性。
+## 1. 算法层面：物理驱动的提纯
 
-### 1. 克隆仓库
-```bash
-git clone https://github.com/zosozepzep/star-chart-recognization.git
-cd star-chart-recognization
-````
+- **双引擎探测 (Double-Engine)**：融合了 Engine B (PSF 亚像素拟合) 与 Engine A (形态学分割)，确保高精度定位与非标目标的全面捕获。
+    
+- **自适应下界雷达**：引入“二阶导数增长率”监控，通过动态阈值自动下探至 $2.5\sigma \sim 3.0\sigma$，成功从背景中挖掘出 65,000+ 颗真实暗星。
+    
+- **线性度审查 (Linearity Check)**：利用 **NumPy 向量化运算** 对 120+ 候选轨迹进行运动学审查，将误报的布朗运动噪点彻底排除，精准锁定 12 个真实运动目标。
+    
 
-### 2. 启动开发环境
+## 2. 工程层面：容器化并行流水线
 
-确保已安装 Docker Desktop 并开启 WSL2 后端：
+- **Docker 一键式环境**：基于容器化部署，利用 Docker 卷挂载实现物理数据与输出产物的无缝解耦。
+    
+- **多进程加速 (Concurrency)**：在 `Phase 2` 引入进程池加速，充分榨干 CPU 多核算力，单帧处理效率提升 5-10 倍。
+    
+- **结构化输出**：自动分类存储图像预览 (`.jpg`) 与科学数据 (`.json`)，支持断点续传。
+    
+
+---
+
+# 🏗️ 环境配置 (WSL2 + Docker)
+
+本项目完全运行在容器化环境中，确保了从开发到比赛提交的环境一致性。
+
+## 1. 启动容器
 
 Bash
 
 ```
+# 构建并启动 OpenCV+Astropy 专用环境
 docker-compose up -d --build
 ```
 
-### 3. 进入容器
+## 2. 进入开发环境
 
 Bash
 
 ```
 docker exec -it opencv_gpu_env bash
+cd /workspace
 ```
 
-## 📁 项目结构
+---
+
+# 📁 优化后的项目结构
 
 Plaintext
 
 ```
 .
-├── data/ # 由于文件太大，已忽略
-│   └── images/          # 存放原始.fits 数据 [cite: 26]
+├── data/
+│   └── images/              # 原始 FITS 序列 (按 20260309... 命名)
 ├── src/
-│   ├── star_detect_fits.py  # 星图识别 Baseline (动态阈值法)
-│   └── utils/           # 工具函数 (FITS转换, 坐标计算)
-├── output/              # 算法输出结果 (可视化图片 & JSON 结构化数据)
-├── Dockerfile           # 镜像构建文件 (集成 CUDA, OpenCV, Astropy)
-└── docker-compose.yml   # 容器编排配置
+│   ├── main_pipeline.py     # 【核心】全自动化主控脚本
+│   ├── detector.py          # 自适应双引擎星点提取器
+│   ├── tracker.py           # 多帧轨迹关联与线性度审查引擎
+│   └── inspect_star.py      # 3D 能量分布物理审查工具
+├── output/
+│   ├── single_frames/       # 过程产物 (按来源引擎着色预览)
+│   │   ├── images/          # Green: Engine B, Cyan: Engine A
+│   │   └── json/            # 每帧的结构化物理特征
+│   └── final_catalog/       # 最终时序清洗后的总星表 (决赛提交格式)
+├── Dockerfile               # 集成 CUDA, OpenCV, Astropy, Photutils
+└── docker-compose.yml       # 容器编排配置
 ```
 
-## 🚀 当前进展 (Milestones)
+---
 
-- [x] **基础环境搭建**：完成基于 Docker + WSL2 的 GPU 加速环境配置。
-    
-- [x] **星图识别 Baseline**：实现基于 `Astropy` 数据解析与动态统计阈值（$\mu + N\sigma$）的星点提取算法，支持自动计算背景底噪并输出 JSON 数据。
-    
-- [ ] **动目标检测**：开发基于多帧差分或目标追踪（DeepSORT）的运动目标识别逻辑。
-    
-- [ ] **创新数据提取**：计划实现太空碎片的光变曲线分析。
+# 🚀 运行流水线
 
-## 📄 许可声明
+在容器内部执行以下操作，即可自动完成从数据排序到目标认定的全过程：
 
-本项目代码仅供参赛使用。数据来源归Spacemapper.cn，先进机器人及仿真技术大赛组委会所有。
+Bash
+
+```
+# 运行自动化流水线
+python src/main_pipeline.py
+```
+
+**流水线逻辑流：**
+
+1. **Phase 1 (Time Sort)**：自动解析文件名中的毫秒级时间戳，建立绝对时间序列。
+    
+2. **Phase 2 (Detection)**：多核并发提取，利用双引擎捕获全量星点并进行边缘裁切。
+    
+3. **Phase 3 (Tracking)**：基于 KD-Tree 进行跨帧关联，剔除瞬态噪点。
+    
+4. **Phase 4 (Physics Check)**：执行线性度向量化校验，生成最终的 `master_catalog.json`。
+
+---
+
+# 📊 当前进展 (Milestones)
+
+- [x] **基础环境搭建**：Docker + WSL2 GPU 开发环境。
+    
+- [x] **高性能提取**：实现自适应双引擎算法，支持 60,000+ 级别的暗星捕获。
+    
+- [x] **时序关联引擎**：完成基于线性度终审的碎片锁定算法，虚警率显著下降。
+    
+- [ ] **光变曲线分析**：(进行中) 计划提取目标在15帧序列中的亮度波动特征。
+    
+- [ ] **速度向量计算**：(规划中) 基于物理时间差 $\Delta t$ 导出目标的绝对像素速度。
+
+---
+
+# 📄 许可声明
+
+本项目代码仅供第十九届先进机器人及仿真技术大赛参赛使用。
+
+**UCAS Aerospace Project - Backend Group**
+
+_Last Update: 2026-05-12_

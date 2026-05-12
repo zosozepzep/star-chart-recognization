@@ -1,4 +1,10 @@
 data/images/*
 !data/images/.gitkeep
-
-output/**/*.jpg
+output/single_frames/images/*
+!output/single_frames/images/.gitkeep
+output/single_frames/json/*
+!output/single_frames/json/.gitkeep
+output/final_catalog/*
+!output/final_catalog/.gitkeep
+src/pycache/*
+/src/__pycache__
