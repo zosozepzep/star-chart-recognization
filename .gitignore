@@ -9,3 +9,4 @@ output/**/*
 # Python cache
 src/pycache/*
 /src/__pycache__
+.obsidian/
