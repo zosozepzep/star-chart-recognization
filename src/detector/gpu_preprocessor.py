@@ -8,7 +8,7 @@ from typing import Tuple
 logger = logging.getLogger("GPUPreprocessor")
 
 class HybridBackgroundEstimator:
-    def __init__(self, box_size: int = 64, sigma_clip: float = 3.0, max_iters: int = 5):
+    def __init__(self, box_size: int = 128, sigma_clip: float = 2.5, max_iters: int = 5):
         """
         CPU-GPU 混合架构背景建模器
         :param box_size: 局部背景统计网格大小

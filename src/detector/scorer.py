@@ -10,7 +10,7 @@ def sigmoid(x):
 
 
 class SourceScorer:
-    def __init__(self, acceptance_threshold: float = 0.65):
+    def __init__(self, acceptance_threshold: float = 0.55):
         self.acceptance_threshold = acceptance_threshold
 
     def score_sources(self, detections):
