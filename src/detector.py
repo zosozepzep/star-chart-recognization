@@ -4,13 +4,13 @@ import warnings
 import cv2
 import numpy as np
 from scipy.spatial import cKDTree
-
 from astropy.io import fits
 from astropy.utils.exceptions import AstropyWarning
 from astropy.stats import sigma_clipped_stats
 from photutils.background import Background2D, MedianBackground
 from photutils.detection import DAOStarFinder, find_peaks
 from photutils.segmentation import detect_sources, SourceCatalog
+from scipy.stats import linregress
 
 # 屏蔽 Astropy 非致命警告
 warnings.simplefilter('ignore', category=AstropyWarning)
@@ -18,67 +18,59 @@ warnings.simplefilter('ignore', category=AstropyWarning)
 
 def auto_calibrate_and_get_gradients(data_sub, std):
     """
-    自适应探测：动态测试星团信号的截断与分布以划取安全的降维梯度
+    基于局部加速度监控与物理护栏的梯度校准
     """
-    print("⏳ [自校准引擎] 正在执行星源分布函数求导 (安全下探模式)...")
+    print("🚀 启动动态下界探测引擎...")
+
+    lower_bound = 3.0 # 理论兜底值
+    prev_count = 1    # 避免除以 0
+    prev_growth_rate = 1.0
     
-    upper_bound = 8.0  # 默认上限安全阈值
-    lower_bound = 1.5  # 默认下限安全阈值
-    
-    # ------------------------------------------------
-    # 1. 寻找阈值上界：探寻主星群爆发点 (从 8.0 往下探)
-    # ------------------------------------------------
-    prev_count = None
-    for multiplier in np.arange(8.0, 5.0, -0.1):
-        threshold = multiplier * std
-        tbl = find_peaks(data_sub, threshold, box_size=5)
-        count = len(tbl) if tbl is not None else 0
+    # 强制护栏：在此阈值之上，无论数据如何跳变，绝不停机
+    SAFETY_GUARDRAIL = 3.5 
+
+    # 从 6.0 往下探，步长 0.15 保证平滑
+    for s in np.arange(6.0, 1.9, -0.1):
+        tbl = find_peaks(data_sub, s * std, box_size=5)
+        current_count = len(tbl) if tbl is not None else 1
         
-        if prev_count is not None and prev_count > 0:
-            growth_rate = count - prev_count
-            # 若数量激增 50% 且增加显著，即可认为到达主星云级
-            if growth_rate > (prev_count * 0.5) and growth_rate > 5: 
-                upper_bound = multiplier
-                print(f"   -> [上界锁定] 主星群爆发于: {upper_bound:.2f}σ")
-                break
-        prev_count = count
-
-    # ------------------------------------------------
-    # 2. 寻找阈值下界：二阶导数探测法 (阻止底部背景噪声雪崩)
-    # ------------------------------------------------
-    prev_count = None
-    
-    # 从 4.0 往 1.5 探索
-    for multiplier in np.arange(4.0, 1.5, -0.1):
-        threshold = multiplier * std
-        tbl = find_peaks(data_sub, threshold, box_size=5)
-        count = len(tbl) if tbl is not None else 0
+        # 1. 计算当前步的一阶增长率
+        current_growth_rate = current_count / prev_count
         
-        if prev_count is not None and prev_count > 50:
-            growth_ratio = count / prev_count if prev_count > 0 else 0
-            
-            # 真实目标的正常增益比通常为 1.1 ~ 1.8 
-            # 增量飙升>2.5意味着切入了底噪段，需要立即阻断往下挖
-            if growth_ratio > 2.5:
-                lower_bound = multiplier + 0.1
-                print(f"   -> [下界锁定] 遭遇非线性噪声池！(激增 {growth_ratio:.1f} 倍) 制动于: {lower_bound:.2f}σ")
+        # 2. 计算二阶加速度 (当前增长率 / 上一步增长率)
+        acceleration = current_growth_rate / prev_growth_rate
+        
+        # 3. 核心审判逻辑
+        if s <= SAFETY_GUARDRAIL:
+            # 只有进入深水区 (<= 3.5σ)，才允许触发刹车
+            # 如果加速度突然飙升 (超过 2.0倍)，或者单步增长率极度异常 (超过 4.0倍)
+            if acceleration > 2.0 or current_growth_rate > 4.0:
+                lower_bound = s + 0.1 # 退回安全区
+                print(f"   [紧急制动] 突破护栏后遭遇底噪墙！")
+                print(f"   -> 阈值: {s:.2f}σ | 恒星数: {current_count} | 加速度: {acceleration:.2f}x")
+                print(f"   -> 最终锁定安全下界: {lower_bound:.2f}σ")
                 break
-                
-        prev_count = count
+
+        # 状态流转
+        prev_count = current_count
+        prev_growth_rate = current_growth_rate if current_growth_rate > 0 else 1.0
+
+    # 如果循环自然结束都没有触发报警，说明图片极度干净
+    if lower_bound == 3.0 and s < 2.5:
+        lower_bound = s + 0.1
+        print(f"   [探底成功] 未遭遇严重噪声墙，锁定极限下界: {lower_bound:.2f}σ")
 
     # ------------------------------------------------
-    # 3. 生成动态梯度
+    # 构造加密步进梯度
     # ------------------------------------------------
-    # 兜底校验
-    if lower_bound >= upper_bound:
-        upper_bound = 8.0
-        lower_bound = 3.5
-
-    # 输出包含安全界的渐下降阈值数组
-    dynamic_gradients = list(np.linspace(upper_bound, lower_bound, 4))
-    print(f"✅ [自校准完成] 最终确定的分阶梯度为: {[round(g, 2) for g in dynamic_gradients]}σ")
+    upper_bound = 15.0
+    gradients = np.unique(np.concatenate([
+        np.linspace(upper_bound, 6.0, 10),       # 高亮区
+        np.arange(6.0, lower_bound - 0.05, -0.1) # 暗弱区高密度采样
+    ]))
+    gradients = sorted(gradients, reverse=True)
     
-    return dynamic_gradients
+    return gradients, lower_bound
 
 
 def process_star_map_ultimate(fits_path, img_out_dir, json_out_dir, file_name):
@@ -105,7 +97,8 @@ def process_star_map_ultimate(fits_path, img_out_dir, json_out_dir, file_name):
     # ==========================================
     # 模块 2：锚定测度与 FWHM 预估
     # ==========================================
-    dynamic_gradients = auto_calibrate_and_get_gradients(data_sub, std)
+    # 同时接收梯度列表和数学下界
+    dynamic_gradients, lower_bound = auto_calibrate_and_get_gradients(data_sub, std)
     
     safe_high_threshold = dynamic_gradients[0] * std
     segm_calib = detect_sources(data_sub, safe_high_threshold, npixels=5)
@@ -254,7 +247,7 @@ def process_star_map_ultimate(fits_path, img_out_dir, json_out_dir, file_name):
                 current_layer_coords.append([cx, cy])
                 tier_added += 1
                                  
-        print(f"      本层斩获全新星点: {tier_added} 颗")
+        print(f"      本层探测到全新星点: {tier_added} 颗")
 
     # ==========================================
     # 模块 4 & 5：分析汇总与渲染输出

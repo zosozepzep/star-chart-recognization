@@ -20,7 +20,10 @@ RUN ln -s /usr/bin/python3 /usr/bin/python
 # 安装带 CUDA 支持相关的包
 RUN pip install --upgrade pip && \
     pip install opencv-python numpy torch torchvision
-# 安装其他常用的科学计算和绘图库
 RUN pip install astropy matplotlib
-RUN pip install photutils scipy 
+RUN pip install photutils scipy
+RUN apt-get update && apt-get install -y source-extractor
+RUN pip install pandas
+RUN pip install cupy-cuda13x
+RUN pip install --upgrade llvmlite numba
 CMD ["tail", "-f", "/dev/null"]

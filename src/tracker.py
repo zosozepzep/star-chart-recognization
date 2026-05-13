@@ -76,7 +76,7 @@ class StarTracker:
                 # ==========================================
                 # 【运动学审核】
                 # ==========================================
-                if displacement < 5.0:
+                if displacement < 2.0:
                     # 类别 A：总位移极小，是在原地微小抖动的【背景恒星】
                     target_type = "Background_Star"
                 else:
@@ -87,7 +87,7 @@ class StarTracker:
                     # 计算线性度 (理想直线为 1.0)
                     linearity = displacement / trajectory_length if trajectory_length > 0 else 0
                     
-                    if linearity > 0.95: 
+                    if linearity > 0.98: 
                         # 真正的物理直线运动
                         target_type = "Moving_Debris"
                     else:
@@ -103,7 +103,7 @@ class StarTracker:
                 confirmed[tid] = {
                     "type": target_type,
                     "appearances": len(track),
-                    "displacement_px": round(displacement, 2),
+                    "displacement_px": round(displacement, 1),
                     "latest_data": track[-1]  # 返回最新一帧的物理信息
                 }
                 

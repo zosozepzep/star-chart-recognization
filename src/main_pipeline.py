@@ -6,8 +6,8 @@ import multiprocessing
 from concurrent.futures import ProcessPoolExecutor
 
 # 导入自定义处理模块
-from detector import process_star_map_ultimate
-from tracker import StarTracker
+from detector.detector import process_star_map_ultimate
+from tracking.tracker import StarTracker
 
 
 def parse_and_sort_fits(image_dir):
