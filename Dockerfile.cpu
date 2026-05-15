@@ -1,0 +1,35 @@
+# CPU-only development image.
+# 用于没有 NVIDIA GPU 的电脑，验证 Python 依赖、SExtractor 和 benchmark 流程。
+FROM python:3.11-slim
+
+WORKDIR /workspace
+
+# 避免 apt 安装时出现交互提示。
+ENV DEBIAN_FRONTEND=noninteractive
+
+# 安装系统依赖：
+# - source-extractor: SExtractor 命令行工具
+# - libgl1 / libglib2.0-0: OpenCV 在 Linux 下常见运行依赖
+RUN apt-get update && apt-get install -y \
+    source-extractor \
+    libgl1 \
+    libglib2.0-0 \
+    && rm -rf /var/lib/apt/lists/*
+
+# 安装 Python 依赖。
+# 注意：CPU 版不安装 cupy-cuda13x，也不要求 NVIDIA CUDA。
+RUN pip install --upgrade pip && \
+    pip install \
+        numpy \
+        pandas \
+        scipy \
+        astropy \
+        matplotlib \
+        photutils \
+        opencv-python \
+        torch \
+        torchvision \
+        llvmlite \
+        numba
+
+CMD ["tail", "-f", "/dev/null"]

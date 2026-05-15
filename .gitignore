@@ -1,10 +1,12 @@
-data/images/*
-!data/images/.gitkeep
-output/single_frames/images/*
-!output/single_frames/images/.gitkeep
-output/single_frames/json/*
-!output/single_frames/json/.gitkeep
-output/final_catalog/*
-!output/final_catalog/.gitkeep
+# Ignore all files in data and output directories
+data/**/*
+output/**/*
+
+# Except for .gitkeep files which preserve the directory structures
+!data/**/.gitkeep
+!output/**/.gitkeep
+
+# Python cache
 src/pycache/*
 /src/__pycache__
+.obsidian/

@@ -1,122 +1,85 @@
-# 🌌 太空目标识别仿真 (SpaceMapper Pipeline v2.0)
+# 🌌 天文星点检测流水线 (Star Chart Recognization)
 
-本仓库用于参加**第十九届先进机器人及仿真技术大赛 - 太空目标识别仿真组**。本项目基于 [Spacemapper.cn](http://spacemapper.cn/) 提供的天基 FITS 序列数据，构建了一套从底层物理特征提取到高层时序轨迹关联的全自动处理流水线。
-
----
-
-# 🚀 核心架构与今日更新 (2026-05-12)
-
-我们已将原有的 Baseline 升级为 **“自适应双引擎 + 时序物理审判”** 架构，解决了海量暗星背景下的虚警问题。
-
-## 1. 算法层面：物理驱动的提纯
-
-- **双引擎探测 (Double-Engine)**：融合了 Engine B (PSF 亚像素拟合) 与 Engine A (形态学分割)，确保高精度定位与非标目标的全面捕获。
-    
-- **自适应下界雷达**：引入“二阶导数增长率”监控，通过动态阈值自动下探至 $2.5\sigma \sim 3.0\sigma$，成功从背景中挖掘出 65,000+ 颗真实暗星。
-    
-- **线性度审查 (Linearity Check)**：利用 **NumPy 向量化运算** 对 120+ 候选轨迹进行运动学审查，将误报的布朗运动噪点彻底排除，精准锁定 12 个真实运动目标。
-    
-
-## 2. 工程层面：容器化并行流水线
-
-- **Docker 一键式环境**：基于容器化部署，利用 Docker 卷挂载实现物理数据与输出产物的无缝解耦。
-    
-- **多进程加速 (Concurrency)**：在 `Phase 2` 引入进程池加速，充分榨干 CPU 多核算力，单帧处理效率提升 5-10 倍。
-    
-- **结构化输出**：自动分类存储图像预览 (`.jpg`) 与科学数据 (`.json`)，支持断点续传。
-    
+本项目用于解决太空目标识别仿真任务，旨在在强噪声、海量恒星背景和复杂伪目标条件下，稳定识别真实天体，并输出可信的物理参数和亚像素级定位精度。当前系统已由规则为主的探测方案完成向**物理约束驱动、可量化评估、可扩展维护的高性能工业级流水线**重构转型。
 
 ---
 
-# 🏗️ 环境配置 (WSL2 + Docker)
+## 🎯 核心能力与特性
 
-本项目完全运行在容器化环境中，确保了从开发到比赛提交的环境一致性。
-
-## 1. 启动容器
-
-Bash
-
-```
-# 构建并启动 OpenCV+Astropy 专用环境
-docker-compose up -d --build
-```
-
-## 2. 进入开发环境
-
-Bash
-
-```
-docker exec -it opencv_gpu_env bash
-cd /workspace
-```
+1. **高召回率挖掘**：通过动态背景估计提取候选目标，尽最大可能挖掘暗弱星点（不惧强噪底线）。
+2. **GPU异构加速**：引入 CuPy 方案进行 GPU 高速预处理，快速求取 Background Map 与 RMS Map。
+3. **亚像素级精度 (Sub-pixel Accuracy)**：依靠光度学特征提取与 2D Gaussian PSF 精细模型拟合，保障检测结果高精度。
+4. **置信度评分与时空滤噪**：
+    - 基于统一评分引擎 (scorer.py) 剔除伪目标。
+    - **空间 NMS (非极大值抑制)** 确保不过分割目标。
+    - **时序关联 (Temporal Association)**与物理轨迹追踪共同完成最终的裁决。
+5. **对齐工程标准**：保留了与天文学标准工具 SExtractor 可视化及量化比对通道。
 
 ---
 
-# 📁 优化后的项目结构
+## 🏗️ 目录结构规划
 
-Plaintext
+核心检测系统现已解耦并重组为完整的树状功能模块：
 
-```
-.
-├── data/
-│   └── images/              # 原始 FITS 序列 (按 20260309... 命名)
+`	ext
+star-chart-recognization/
+├── data/                       # 原始图像与 FITS 序列
+├── output/                     # 处理流程中途产出与终版 Catalog (含SExtractor测试对比)
 ├── src/
-│   ├── main_pipeline.py     # 【核心】全自动化主控脚本
-│   ├── detector.py          # 自适应双引擎星点提取器
-│   ├── tracker.py           # 多帧轨迹关联与线性度审查引擎
-│   └── inspect_star.py      # 3D 能量分布物理审查工具
-├── output/
-│   ├── single_frames/       # 过程产物 (按来源引擎着色预览)
-│   │   ├── images/          # Green: Engine B, Cyan: Engine A
-│   │   └── json/            # 每帧的结构化物理特征
-│   └── final_catalog/       # 最终时序清洗后的总星表 (决赛提交格式)
-├── Dockerfile               # 集成 CUDA, OpenCV, Astropy, Photutils
-└── docker-compose.yml       # 容器编排配置
-```
+│   ├── main_pipeline.py        # 【核心】端到端全自动化流水线 
+│   ├── combat_mission.py       # 竞赛或核心批处理运行任务
+│   ├── detector/               # 单帧检测引擎模块组
+│   │   ├── gpu_preprocessor.py # 基于 CuPy 的 GPU 混合背景推断 
+│   │   ├── candidate_generator.py # 最初的基于阈值或 DAO 的粗提取
+│   │   ├── feature_extractor.py   # 背景与基本测光特征抓取
+│   │   ├── psf_fitter.py          # 二维全局及局部 PSF 高斯拟合
+│   │   ├── scorer.py              # 高维联合置信度判定
+│   │   └── nms.py                 # 密区非极大值抑制去重
+│   ├── tracking/               # 时序追踪裁决模块组
+│   │   ├── associator.py       # 跨帧关联分析
+│   │   ├── kalman.py           # 卡尔曼滤波位置预期验证
+│   │   └── physical_validator.py# 线速度、物理特性等整体审查
+│   ├── benchmark/              # 量化基点评估模块
+│   └── visualization/          # 对比效果与过程渲染
+├── Dockerfile                  # 含CUDA与Python天文核心依赖的构建镜像
+├── docker-compose.yml          # 一键开发环境容器编排
+├── cross_match_diagnostics.py  # 用于交叉验证对齐效果的工具脚本
+└── 规划.md                     # 工程演进与重构路线图
+`
 
 ---
 
-# 🚀 运行流水线
+## 🚀 部署与运行
 
-在容器内部执行以下操作，即可自动完成从数据排序到目标认定的全过程：
+本项目底层高度依赖 CUDA GPU 算力执行张量推断。为避免本机环境的 Numba, CuPy与 CUDA runtime 版本冲突，**强烈建议使用 Docker 进行一键调试与运行。**
 
-Bash
+### 1. 启动并进入容器
 
-```
-# 运行自动化流水线
-python src/main_pipeline.py
-```
+`bash`
+`docker-compose up -d --build`
+`docker-compose exec [容器名] /bin/bash`  # 具体名称参考 compose 的 services 配置
 
-**流水线逻辑流：**
+环境镜像内已封装最新的**nvidia/cuda:13.x** 以及**OpenCV, CuPy, Astropy, Photutils**等必备框架。)
 
-1. **Phase 1 (Time Sort)**：自动解析文件名中的毫秒级时间戳，建立绝对时间序列。
-    
-2. **Phase 2 (Detection)**：多核并发提取，利用双引擎捕获全量星点并进行边缘裁切。
-    
-3. **Phase 3 (Tracking)**：基于 KD-Tree 进行跨帧关联，剔除瞬态噪点。
-    
-4. **Phase 4 (Physics Check)**：执行线性度向量化校验，生成最终的 `master_catalog.json`。
+### 2. 一键启动
 
----
+在容器环境下进入该项目根目录路径中即可运行：
 
-# 📊 当前进展 (Milestones)
+`bash`
+`python src/combat_mission.py`
+`
 
-- [x] **基础环境搭建**：Docker + WSL2 GPU 开发环境。
-    
-- [x] **高性能提取**：实现自适应双引擎算法，支持 60,000+ 级别的暗星捕获。
-    
-- [x] **时序关联引擎**：完成基于线性度终审的碎片锁定算法，虚警率显著下降。
-    
-- [ ] **光变曲线分析**：(进行中) 计划提取目标在15帧序列中的亮度波动特征。
-    
-- [ ] **速度向量计算**：(规划中) 基于物理时间差 $\Delta t$ 导出目标的绝对像素速度。
+### 3. 基准测试 (SExtractor Benchmark)
+
+如需对自研模型与权威天文库的结果进行定量比对，以明确召回率与虚警率：
+
+`bash` 
+`python cross_match_diagnostics.py`
 
 ---
 
-# 📄 许可声明
+## 📜 更新与展望
 
-本项目代码仅供第十九届先进机器人及仿真技术大赛参赛使用。
-
-**UCAS Aerospace Project - Backend Group**
-
-_Last Update: 2026-05-12_
+项目正逐步剔除原有的纯启发阶段算法，向更加纯粹的物理信息系统衍进。
+# Changelog
+[[2026.05.13]]
