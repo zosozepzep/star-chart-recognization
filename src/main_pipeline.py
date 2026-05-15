@@ -23,7 +23,7 @@ class StarDetectorPipeline:
     def __init__(self):
         """初始化流水线的各个节点 (Node)"""
         logger.info("Initializing Pipeline Modules...")
-        # 实例化混合架构 GPU 预处理器
+        # 实例化 CPU 预处理器
         self.preprocessor = HybridBackgroundEstimator(box_size=128, sigma_clip=2.5)
         self.generator = CandidateGenerator(
             dao_threshold_sigma=3.0, 
@@ -40,9 +40,9 @@ class StarDetectorPipeline:
         t0 = time.time()
         
         # ==========================================
-        # 🌟 Step 0: GPU 高速预处理 (产生 rms_map 和 bkg_map)
+        # Step 0: CPU 预处理 (产生 rms_map 和 bkg_map)
         # ==========================================
-        logger.info("Step 0: Estimating background via CuPy...")
+        logger.info("Step 0: Estimating background via CPU...")
         bkg_map, rms_map = self.preprocessor.estimate(data)
         
         # 图像减去背景图，得到用于目标检测的纯净信号
@@ -52,7 +52,7 @@ class StarDetectorPipeline:
         # Step 1: 候选生成
         # ==========================================
         logger.info("Step 1: Generating candidates...")
-        # 从高精度的 GPU RMS 图中提取全局噪声底线
+        # 从 RMS 图中提取全局噪声底线
         global_std = float(np.median(rms_map))
         
         # 传入纯净信号 data_sub 和底噪 global_std

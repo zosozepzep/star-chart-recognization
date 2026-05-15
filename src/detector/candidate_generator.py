@@ -33,9 +33,11 @@ class CandidateGenerator:
         
         if dao_tbl is not None:
             for row in dao_tbl:
+                x_key = 'xcentroid' if 'xcentroid' in dao_tbl.colnames else 'x_centroid'
+                y_key = 'ycentroid' if 'ycentroid' in dao_tbl.colnames else 'y_centroid'
                 all_candidates.append({
-                    'x': row['xcentroid'],
-                    'y': row['ycentroid'],
+                    'x': row[x_key],
+                    'y': row[y_key],
                     'engine_votes': ['DAO']  # 修复：改为列表，键名为 engine_votes
                 })
 

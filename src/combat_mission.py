@@ -13,6 +13,7 @@ from astropy.time import Time
 from main_pipeline import StarDetectorPipeline
 from tracking.associator import KDTreeAssociator
 from tracking.physical_validator import TrackValidator
+from benchmark.benchmark_runner import run_detection_benchmark
 
 # 配置实战日志格式
 logging.basicConfig(
@@ -22,9 +23,15 @@ logging.basicConfig(
 )
 logger = logging.getLogger("CombatMission")
 
-def run_combat_mission(data_dir: str, output_csv: str):
+def run_combat_mission(data_dir: str, output_csv: str, enable_benchmark: bool = False):
     """
     全功率实战入口：支持绝对物理时间排序、GPU/CPU混合加速、卡尔曼时序追踪
+
+    enable_benchmark:
+        是否启用 detection-level benchmark。
+        如果为 False，只运行原本的 pipeline 和 tracking。
+        如果为 True，会在我方 all_raw_detections.csv 生成后自动运行 SExtractor，
+        再用 SExtractor catalog 和我方 detection catalog 做 cross-match。
     """
     logger.info("⚔️ INITIATING COMBAT MISSION...")
     
@@ -127,6 +134,10 @@ def run_combat_mission(data_dir: str, output_csv: str):
             logger.warning("Skipping to next frame to maintain radar lock...")
             continue
 
+    # 关闭 Level 1 原始星表文件。
+    # benchmark 会读取 all_raw_detections.csv，所以必须先确保数据已经完整写入磁盘。
+    raw_file.close()
+
     # ==========================================
     # 阶段 3：终审与打扫战场 (Validation & Export)
     # ==========================================
@@ -165,12 +176,27 @@ def run_combat_mission(data_dir: str, output_csv: str):
     t_mission_total = time.time() - t_mission_start
     logger.info(f"🏁 COMBAT MISSION ACCOMPLISHED IN {t_mission_total:.2f}s!")
 
+    if enable_benchmark:
+        logger.info("📊 BENCHMARK ENABLED. RUNNING SExtractor + cross-match...")
+        run_detection_benchmark(
+            image_dir=data_dir,
+            pipeline_catalog_path=raw_catalog_path,
+            output_dir="./output/benchmark",
+            match_radius=2.0,
+        )
+        logger.info("📊 BENCHMARK FINISHED. Results saved to ./output/benchmark")
+
 if __name__ == "__main__":
     # ⚠️ 启动前，请确保这两个路径在你的环境中是正确的
-    REAL_DATA_DIRECTORY = "./data/fits_sequence" # 替换为你的 FITS 文件夹
+    REAL_DATA_DIRECTORY = "./data/images" # 替换为你的 FITS 文件夹
     OUTPUT_CATALOG = "./output//new/final_catalog.csv"  # 替换为你想要保存 CSV 的路径
+    ENABLE_BENCHMARK = True # True 时自动运行 SExtractor 并生成 benchmark 结果
     
     # 如果目录不存在，自动创建输出目录
     os.makedirs(os.path.dirname(OUTPUT_CATALOG), exist_ok=True)
     
-    run_combat_mission(REAL_DATA_DIRECTORY, OUTPUT_CATALOG)
+    run_combat_mission(
+        REAL_DATA_DIRECTORY,
+        OUTPUT_CATALOG,
+        enable_benchmark=ENABLE_BENCHMARK,
+    )

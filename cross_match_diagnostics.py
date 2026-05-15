@@ -1,94 +1,116 @@
-import pandas as pd
+from pathlib import Path
+
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.colors import LogNorm
-from scipy.spatial import cKDTree
 from astropy.io import fits
 
-def run_cross_match_diagnosis(pipeline_csv, sextractor_csv, fits_image_path, match_radius=2.0):
-    print("🔍 启动交叉匹配诊断引擎...")
-    
-    # 1. 加载数据
-    df_mine = pd.read_csv(pipeline_csv)
-    # 自动识别空格或逗号分隔
-    try:
-        df_sex = pd.read_csv(sextractor_csv)
-        if len(df_sex.columns) <= 1:
-            df_sex = pd.read_csv(sextractor_csv, sep='\s+')
-    except:
-        df_sex = pd.read_csv(sextractor_csv, sep='\s+')
-    
-    # 2. 提取坐标矩阵 (🌟 关键修正点)
-    # 我方系统列名是 X, Y
-    coords_mine = df_mine[['X', 'Y']].values
-    
-    # SExtractor 示例文件的列名是 X_IMAGE, Y_IMAGE
-    if 'X_IMAGE' in df_sex.columns:
-        coords_sex = df_sex[['X_IMAGE', 'Y_IMAGE']].values
-    elif 'XWIN_IMAGE' in df_sex.columns:
-        coords_sex = df_sex[['XWIN_IMAGE', 'YWIN_IMAGE']].values
-    else:
-        print(f"❌ 错误：在 SE 目录中找不到坐标列。当前列名为: {df_sex.columns.tolist()}")
-        return
+from src.benchmark.cross_match import run_cross_match
 
-    print(f" -> 我的系统检出: {len(coords_mine)} 颗")
-    print(f" -> SExtractor 检出: {len(coords_sex)} 颗")
 
-    # 3. 构建 KD-Tree 空间索引并匹配
-    tree_sex = cKDTree(coords_sex)
-    distances, indices = tree_sex.query(coords_mine, k=1)
-    
-    matched_mask = distances < match_radius
-    orphan_mask = ~matched_mask
-    
-    df_orphans = df_mine[orphan_mask]
-    print(f" -> 匹配成功 (双方共识): {np.sum(matched_mask)} 颗")
-    print(f" -> 孤儿目标 (我方独有): {len(df_orphans)} 颗")
+def render_pipeline_only_diagnostic(fits_image_path, pipeline_only_df, output_image="diagnostic_plot.png"):
+    """
+    生成一张单帧诊断图。
 
-   # 5. 可视化诊断
-    print(f"🎨 正在渲染诊断图像...")
+    这部分属于可视化辅助，不参与 benchmark 指标计算。
+    它的作用是把 pipeline-only 的点画在原始 FITS 图像上，
+    方便人工观察这些点是真实暗星、噪声，还是亮星附近的伪目标。
+    """
+    # 读取 FITS 原图数据。
+    # 后面所有红圈都会叠加在这张图上。
     data = fits.getdata(fits_image_path)
-    
-    # --- 🌟 关键修复开始 ---
-    # 1. 确保数据中没有非正数（对数映射要求值 > 0）
-    # 我们将所有小于等于 0 的值替换为一个微小的正数（如背景标准差的 0.1 倍）
+
+    # Matplotlib 的 LogNorm 要求图像值必须大于 0。
+    # FITS 数据里可能存在 0 或负数，所以这里先复制一份显示用数据，
+    # 再把所有非正数替换成一个很小的正数，避免画图时报错。
     display_data = data.copy()
     floor_val = np.percentile(display_data[display_data > 0], 1) if np.any(display_data > 0) else 1e-5
     display_data[display_data <= 0] = floor_val
 
-    # 2. 安全计算 vmin 和 vmax
+    # 使用 1% 到 99.5% 分位数做显示范围。
+    # 这样可以压住极亮点，让暗弱结构也能看得见。
     vmin = np.percentile(display_data, 1)
-    vmax = np.percentile(display_data, 99.5) # 稍微提高上限，增强对比度
-    
-    # 3. 防止 vmin 和 vmax 重合
+    vmax = np.percentile(display_data, 99.5)
+
+    # 防御极端情况：
+    # 如果图像几乎是常数，分位数可能相等，此时退回到 min/max。
     if vmin >= vmax:
         vmin = display_data.min()
         vmax = display_data.max()
-    # --- 🌟 关键修复结束 ---
 
+    # 画原始 FITS 图像。
+    # Greys_r 表示反色灰度图，origin="lower" 保持天文图像常见坐标方向。
     plt.figure(figsize=(12, 12))
-    
-    # 使用修复后的 display_data 和 vmin/vmax
-    plt.imshow(display_data, cmap='Greys_r', origin='lower', 
-               norm=LogNorm(vmin=vmin, vmax=vmax))
-    # 画出那 3000 个异常孤儿点 (红色大圈，重点嫌疑)
-    plt.scatter(df_orphans['X'], df_orphans['Y'], 
-                s=40, facecolors='none', edgecolors='red', linewidth=1.5, label='Orphans (Pipeline Only)')
-    
+    plt.imshow(display_data, cmap="Greys_r", origin="lower", norm=LogNorm(vmin=vmin, vmax=vmax))
+
+    # pipeline_only_df 表示“我方检测到，但 SExtractor 没匹配上”的点。
+    # 这里用红色空心圆标出来，方便观察这些点集中在哪里。
+    if not pipeline_only_df.empty:
+        plt.scatter(
+            pipeline_only_df["X"],
+            pipeline_only_df["Y"],
+            s=40,
+            facecolors="none",
+            edgecolors="red",
+            linewidth=1.5,
+            label="Pipeline Only",
+        )
+
+    # 添加基本标题、坐标轴和图例。
     plt.title("Cross-Match Diagnostic: Pipeline vs SExtractor", fontsize=16)
     plt.xlabel("X Pixel")
     plt.ylabel("Y Pixel")
-    plt.legend(loc='upper right')
-    
-    # 保存高分辨率诊断图
-    out_img = "diagnostic_plot.png"
-    plt.savefig(out_img, dpi=300, bbox_inches='tight')
-    print(f"✅ 诊断完毕！请立即打开 {out_img} 验尸！")
+    plt.legend(loc="upper right")
+
+    # 保存高分辨率图片，供人工查看。
+    # close() 用来释放 matplotlib 当前图，避免批量画图时占内存。
+    plt.savefig(output_image, dpi=300, bbox_inches="tight")
+    plt.close()
+
+
+def run_cross_match_diagnosis(
+    pipeline_csv,
+    sextractor_csv,
+    fits_image_path=None,
+    match_radius=2.0,
+    output_dir="output/benchmark",
+    output_image="diagnostic_plot.png",
+):
+    print("Starting single-frame cross-match benchmark...")
+    result = run_cross_match(
+        pipeline_catalog_path=pipeline_csv,
+        sextractor_catalog_path=sextractor_csv,
+        match_radius=match_radius,
+        output_dir=output_dir,
+    )
+
+    for key, value in result["summary"].items():
+        print(f" -> {key}: {value}")
+
+    if fits_image_path:
+        render_pipeline_only_diagnostic(
+            fits_image_path=fits_image_path,
+            pipeline_only_df=result["pipeline_only"],
+            output_image=output_image,
+        )
+        print(f"Diagnostic image saved to {output_image}")
+
+    print(f"Benchmark outputs saved to {Path(output_dir)}")
+    return result
 
 if __name__ == "__main__":
-    # 请填入你实际的文件路径
-    PIPELINE_CSV = "output/new/all_raw_detections.csv" # 我们刚才新增导出的 Level 1 总表
-    SEXTRACTOR_CSV = "output/sextractor_test/catalogs/20260309133855754_6002_stand.csv" # 你的 SExtractor 跑出来的结果
-    FITS_IMAGE = "data/fits_sequence/20260309133855754_6002_stand.fits" # 那张异常的原始 FITS 图片
-    
-    run_cross_match_diagnosis(PIPELINE_CSV, SEXTRACTOR_CSV, FITS_IMAGE, match_radius=2.0)
+    # 这里保持原脚本风格：直接在文件里填写路径，然后运行。
+    # 如果想换数据，只需要改下面这几个变量。
+    PIPELINE_CSV = "output/new/all_raw_detections.csv"
+    SEXTRACTOR_CSV = "output/benchmark/sextractor/catalogs/20260330163205413_9901.csv"
+    FITS_IMAGE = None
+    OUTPUT_DIR = "output/benchmark"
+    MATCH_RADIUS = 2.0
+
+    run_cross_match_diagnosis(
+        pipeline_csv=PIPELINE_CSV,
+        sextractor_csv=SEXTRACTOR_CSV,
+        fits_image_path=FITS_IMAGE,
+        match_radius=MATCH_RADIUS,
+        output_dir=OUTPUT_DIR,
+    )
