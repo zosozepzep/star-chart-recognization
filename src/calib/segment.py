@@ -1,6 +1,6 @@
 """机架状态分段。
 
-只读 FITS 头的 AZIMUTH 与 DATE-OBS，不碰像素，因此绝不会被噪声干扰——
+只读 FITS 头的 AZIMUTH，不碰像素，因此绝不会被噪声干扰——
 这是整条流水线中最可靠的一步，放在最前面。
 
 判据：把逐帧方位角增量序列切成"整段标准差低于阈值"的极大连续段。之所以看
@@ -10,7 +10,9 @@
 标准差立刻超阈值。
 
 段的取舍用两个长度门槛：window 是"够不够估计一个标准差"的最少增量数，
-min_length 是跟踪段的最短帧数。这样不需要给 |ΔAZ| 设人为下限：数据集 A 开头
+min_length 是跟踪段的最短帧数。注意在出厂默认值下（window=5、min_length=10）
+min_length 已经蕴含 window——n_rates >= 9 必然满足 n_rates >= 5——所以 window
+只有取到 >=10 才会真正影响结果。这样不需要给 |ΔAZ| 设人为下限：数据集 A 开头
 的 5 帧静止段自然被 min_length=10 排除，而不必区分"静止"与"慢速跟踪"。
 """
 from __future__ import annotations
@@ -44,7 +46,7 @@ class Segment:
 
 
 def azimuth_rates(headers: list[FrameHeader]) -> np.ndarray:
-    """逐帧方位角增量（°/帧），已把差值折到 (-180, 180]。"""
+    """逐帧方位角增量（°/帧），已把差值折到 [-180, 180)。"""
     az = np.array([h.azimuth_deg for h in headers], dtype=np.float64)
     d = np.diff(az)
     return (d + 180.0) % 360.0 - 180.0

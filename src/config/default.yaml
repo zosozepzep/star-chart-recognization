@@ -2,8 +2,8 @@ paths:
   output_root: output
 
 segment:
-  window: 5                 # ΔAZ 滚动标准差的窗口长度（帧）
-  std_threshold_deg: 0.05   # 稳定跟踪判据（数据集 B 实测 0.003）
+  window: 5                 # 估计一个标准差所需的最少 ΔAZ 增量数；默认下被 min_length 吞并，仅 >=10 时才起作用
+  std_threshold_deg: 0.05   # 稳定跟踪判据（数据集 B 实测 0.0144，见 docs/reports/measurements.md）
   min_length: 10            # 最短跟踪段帧数；同时排除数据集 A 的 5 帧静止段
 
 background:

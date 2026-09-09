@@ -184,8 +184,11 @@ def test_short_stable_run_is_not_tracking():
 def test_window_rejects_stable_run_shorter_than_window():
     """稳定段短于 window 时不算跟踪段——window 是估计标准差的最少增量数。
 
-    平台只有 6 个增量：window=5 时通过，window=8 时整段落回 slew。摆扫故意带
-    抖动，避免摆扫自己形成稳定段而与平台相连。
+    平台恰好 6 个增量，因此把边界钉死在 window=6 与 window=7 之间：window=6 时
+    `n_rates >= window` 取等成立而通过，window=7 时落回 slew。用「恰好等于」这一
+    对取值，才能同时排除 `>` 与 `>= window - 1` 这两种写错的比较；window=5 与 8
+    这样的宽松取值对三者都通过，区分不出来。摆扫故意带抖动，避免摆扫自己形成稳定
+    段而与平台相连。
     """
     jitter = [6.0, 5.3, 6.7, 5.6, 6.4]
     az = [0.0]
@@ -196,11 +199,50 @@ def test_window_rejects_stable_run_shorter_than_window():
     for d in jitter:
         az.append(az[-1] + d)
     hdrs = make_headers(az)
-    kept = segment_sequence(hdrs, window=5, min_length=2)
+    kept = segment_sequence(hdrs, window=6, min_length=2)
     assert [s.label for s in kept] == ["slew", "tracking", "slew"]
     assert (kept[1].start, kept[1].end) == (5, 11)
-    dropped = segment_sequence(hdrs, window=8, min_length=2)
+    dropped = segment_sequence(hdrs, window=7, min_length=2)
     assert [s.label for s in dropped] == ["slew"]
+
+
+def test_two_frame_sequence_is_the_minimum_accepted():
+    """2 帧是分段的下界：只有一个增量，不报错，但也构不成跟踪段。"""
+    segs = segment_sequence(make_headers([10.0, 10.2]))
+    assert len(segs) == 1
+    assert segs[0].label == "slew"
+    assert (segs[0].start, segs[0].end) == (0, 1)
+    assert segs[0].daz_mean == pytest.approx(0.2)
+    assert segs[0].daz_std == pytest.approx(0.0)
+
+
+def test_all_tracking_sequence_is_one_segment_covering_all_frames():
+    """整条序列都在稳定跟踪时只有一段，且必须覆盖到末帧。"""
+    az = [0.0]
+    for _ in range(19):
+        az.append(az[-1] + 0.222)
+    segs = segment_sequence(make_headers(az))
+    assert len(segs) == 1
+    assert segs[0].label == "tracking"
+    assert (segs[0].start, segs[0].end) == (0, len(az) - 1)
+    assert segs[0].length == len(az)
+
+
+def test_tracking_segment_tie_break_takes_the_earlier_segment():
+    """两个跟踪段等长时取靠前的那个——固定 max() 的稳定性，避免行为随实现漂移。"""
+    az = [0.0]
+    for _ in range(14):
+        az.append(az[-1] + 0.20)
+    for d in [6.0, 5.3, 6.7, 5.6, 6.4]:
+        az.append(az[-1] + d)
+    for _ in range(14):
+        az.append(az[-1] + 0.44)
+    segs = segment_sequence(make_headers(az))
+    tracking = [s for s in segs if s.label == "tracking"]
+    assert len(tracking) == 2
+    assert tracking[0].length == tracking[1].length  # 等长才是这条断言的前提
+    seg = tracking_segment(make_headers(az))
+    assert (seg.start, seg.end) == (tracking[0].start, tracking[0].end)
 
 
 def test_no_tracking_segment_raises():
@@ -224,8 +266,14 @@ def test_dataset_b_tracking_segment_is_f16_to_f70(dataset_b_dir):
 
 
 def test_dataset_a_has_one_long_tracking_segment(dataset_a_dir):
+    """数据集 A 的跟踪段实测 f04-f35，钉死实测值而非任务书的宽松下限。
+
+    任务书写的是 `start <= 6`、`length >= 28`，实测是 4 与 32；宽松界会让边界左右
+    漂两帧都算通过，回归就看不出来了。实测数字见 docs/reports/measurements.md。
+    """
     seq = FrameSequence.from_directory(dataset_a_dir)
     seg = tracking_segment(seq.headers)
-    assert seg.end == 35
-    assert seg.start <= 6
-    assert seg.length >= 28
+    assert (seg.start, seg.end) == (4, 35)
+    assert seg.length == 32
+    assert seg.daz_mean == pytest.approx(0.4749, abs=0.001)
+    assert seg.daz_std == pytest.approx(0.0160, abs=0.001)

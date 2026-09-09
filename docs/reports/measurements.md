@@ -21,7 +21,7 @@ from src.dataio.fits_loader import FrameSequence
 for d in ['data/images/60394_20260309_1437117414637934_PIC',
           'data/images/60385_20260722_1485695076008039_PIC_POS']:
     seq = FrameSequence.from_directory(d)
-    print(seq.dataset_id, len(seq))
+    print(seq.dataset_id, len(seq), 'cadence %.5f s' % seq.cadence_s())
     for s in segment_sequence(seq.headers):
         print('   %-8s f%02d-f%02d (%2d) daz %+.4f +- %.4f' %
               (s.label, s.start, s.end, s.length, s.daz_mean, s.daz_std))
@@ -31,10 +31,10 @@ for d in ['data/images/60394_20260309_1437117414637934_PIC',
 实测输出：
 
 ```
-60394_20260309_1437117414637934_PIC 36
+60394_20260309_1437117414637934_PIC 36 cadence 1.00900 s
    slew     f00-f03 ( 4) daz +0.0002 +- 0.0002
    tracking f04-f35 (32) daz +0.4749 +- 0.0160
-60385_20260722_1485695076008039_PIC_POS 80
+60385_20260722_1485695076008039_PIC_POS 80 cadence 1.00900 s
    slew     f00-f15 (16) daz +0.0784 +- 5.3699
    tracking f16-f70 (55) daz +0.2214 +- 0.0144
    slew     f71-f79 ( 9) daz -5.9676 +- 0.0533
@@ -62,7 +62,7 @@ for d in ['data/images/60394_20260309_1437117414637934_PIC',
 1. **数据集 B 跟踪段的 `daz_std` 是 0.0144，不是 <0.01。** 段内第一个增量
    `r16 (f16→f70 方向的 f16→f17)` 为 **+0.11899**，明显小于其余增量的
    ~0.2225——这是机架停稳前的余量。剔除这一个增量后，其余 53 个增量的标准差仅
-   **0.0032**（即 `default.yaml` 注释中"数据集 B 实测 0.003"的出处）。f16 依真值
+   **0.0032**。f16 依真值
    时标确属跟踪段，故保留该帧、按实测修正标准差预期，而非挪动分段边界。
 
 2. **数据集 A 确有一个可用的长跟踪段：f04–f35，共 32 帧。** 开头 f00–f03 的
