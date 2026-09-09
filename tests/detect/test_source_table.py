@@ -33,12 +33,15 @@ def test_dtypes_are_coerced_even_from_python_lists():
     t = SourceTable(frame=1, x=[1, 2], y=[3, 4], flux=[5, 6],
                     peak=[7, 8], elongation=[9, 10], npix=[11, 12])
     for arr in (t.x, t.y, t.flux, t.peak, t.elongation):
-        assert isinstance(arr, np.ndarray) and arr.dtype == np.float64
-    assert isinstance(t.npix, np.ndarray) and t.npix.dtype == np.int64
+        assert type(arr) is np.ndarray and arr.dtype == np.float64
+    assert type(t.npix) is np.ndarray and t.npix.dtype == np.int64
 
 
 def test_astropy_columns_with_units_do_not_leak():
-    """Unit-bearing astropy Columns must become plain arrays for cKDTree."""
+    """Unit-bearing astropy Columns must become plain arrays for cKDTree.
+
+    Column subclasses ndarray and keeps its dtype, so `dtype ==` and `isinstance(..., np.ndarray)` both pass on an unconverted Column. Only the exact type and the absence of `unit` prove the coercion actually ran.
+    """
     from astropy.table import Column
     from astropy import units as u
     from scipy.spatial import cKDTree
@@ -52,6 +55,12 @@ def test_astropy_columns_with_units_do_not_leak():
         elongation=Column([1.1, 1.2], unit=u.dimensionless_unscaled),
         npix=Column([64, 45], unit=u.Unit("pix2")),
     )
+    for name in ("x", "y", "flux", "peak", "elongation", "npix"):
+        arr = getattr(t, name)
+        # `type(...) is np.ndarray` on purpose: Column IS an ndarray subclass,
+        # so isinstance would pass on an unconverted column.
+        assert type(arr) is np.ndarray, f"{name} kept its Column subclass"
+        assert not hasattr(arr, "unit"), f"{name} leaked a unit"
     assert t.npix.dtype == np.int64
     assert not hasattr(t.xy, "unit")
     cKDTree(t.xy).query(np.array([[50.0, 60.0]]))
@@ -122,9 +131,13 @@ def test_empty_is_fully_formed():
     assert SourceTable.empty(frame=16).frame == 16
 
 
-def test_ragged_columns_are_rejected():
-    """Mismatched column lengths must fail during construction."""
-    with pytest.raises(ValueError):
+def test_ragged_columns_are_rejected_with_chinese_lengths():
+    """Mismatched column lengths must fail at construction, in Chinese, with the lengths."""
+    with pytest.raises(ValueError) as exc:
         SourceTable(frame=0, x=np.array([1.0, 2.0]), y=np.array([1.0]),
                     flux=np.array([1.0, 2.0]), peak=np.array([1.0, 2.0]),
                     elongation=np.array([1.0, 2.0]), npix=np.array([1, 2]))
+    msg = str(exc.value)
+    assert any("一" <= ch <= "鿿" for ch in msg)
+    # the offending column and both lengths must be identifiable from the message
+    assert "y" in msg and "2" in msg and "1" in msg
