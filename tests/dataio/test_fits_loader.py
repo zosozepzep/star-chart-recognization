@@ -112,16 +112,21 @@ def test_sequence_image_matches_direct_load(dataset_b_dir):
 
 
 def test_from_directory_reorders_and_reindexes(tmp_path):
-    """文件名次序与时间次序相反时，序列必须按时间重排并重编 index。"""
-    # b_first.fits 文件名在前，但观测时间在后
-    _write_fits(tmp_path / "b_first.fits", "2026-07-21T17:26:30.000", fill=20)
-    _write_fits(tmp_path / "a_second.fits", "2026-07-21T17:26:29.000", fill=10)
+    """文件名次序与时间次序不同时，序列必须按时间重排并重编 index。
+
+    用三帧而非两帧：两元素置换 [1, 0] 是自身的逆，无法区分 gather 与 scatter 实现。
+    这里文件名序 a,b,c 对应时间序 c,a,b（置换非自逆），因此把重排方向写反会失败。
+    """
+    _write_fits(tmp_path / "a.fits", "2026-07-21T17:26:30.000", fill=10)
+    _write_fits(tmp_path / "b.fits", "2026-07-21T17:26:31.000", fill=20)
+    _write_fits(tmp_path / "c.fits", "2026-07-21T17:26:29.000", fill=30)
 
     seq = FrameSequence.from_directory(tmp_path)
-    assert [h.path.name for h in seq.headers] == ["a_second.fits", "b_first.fits"]
-    assert [h.index for h in seq.headers] == [0, 1]
-    assert seq.image(0)[0, 0] == pytest.approx(10.0)
-    assert seq.image(1)[0, 0] == pytest.approx(20.0)
+    assert [h.path.name for h in seq.headers] == ["c.fits", "a.fits", "b.fits"]
+    assert [h.index for h in seq.headers] == [0, 1, 2]
+    assert seq.image(0)[0, 0] == pytest.approx(30.0)
+    assert seq.image(1)[0, 0] == pytest.approx(10.0)
+    assert seq.image(2)[0, 0] == pytest.approx(20.0)
     assert seq.cadence_s() == pytest.approx(1.0)
 
 
