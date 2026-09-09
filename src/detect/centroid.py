@@ -184,9 +184,15 @@ def remeasure(
         radius,
         box,
     )
-    # Every column is an explicit copy: xy[:, 0] and xy[:, 1] are views into the
-    # same array, so handing them over directly would make out.x and out.y share
-    # a base with each other and with `xy`.
+    # Every column is an explicit copy. For x/y this matters because xy[:, 0] and
+    # xy[:, 1] are views into one array — the guard is `base is None` in
+    # test_remeasure_output_columns_are_independent_copies, NOT a behavioural
+    # "mutate one, check the other" test: the two columns do not overlap, so such
+    # a test cannot fail. For elongation/npix the reverse holds: `base` stays None
+    # even without the copy (SourceTable's np.asarray is the identity on
+    # already-float64/int64 contiguous input), so only the behavioural assertion
+    # against the input table catches a dropped copy. Both kinds of check are
+    # needed; neither subsumes the other.
     return SourceTable(
         frame=table.frame,
         x=xy[:, 0].copy(),

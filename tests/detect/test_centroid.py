@@ -124,6 +124,23 @@ def test_cutout_rejects_even_box_in_chinese():
     assert cutout(img, 20.0, 30.0, 9)[0].shape == (9, 9)
 
 
+def test_cutout_rejects_non_positive_box_in_chinese():
+    """B-3：`box <= 0` 这道守卫此前没有任何测试——删掉它整套 23 项照样全绿。
+
+    `box=0` 会先被偶数分支拦下（0 是偶数），负奇数（-1、-3）才走到
+    `box <= 0` 那一条。两条路径都必须给出中文 ValueError，且不能静默返回
+    空切片：`half = -1 // 2` 在 Python 里是 -1，于是 box=-1 若不拦会得到一个
+    形状诡异的窗口而不是报错。
+    """
+    img = make_image([(20.0, 30.0, 1000.0)])
+    for bad in (0, -1, -3, -9):
+        with pytest.raises(ValueError) as exc:
+            cutout(img, 20.0, 30.0, bad)
+        msg = str(exc.value)
+        assert any("一" <= ch <= "鿿" for ch in msg), f"box={bad} 的报错不是中文"
+        assert str(bad) in msg, f"box={bad} 的报错未给出实际取值"
+
+
 # --------------------------------------------------------------------------
 # aperture_flux
 # --------------------------------------------------------------------------
@@ -149,20 +166,43 @@ def test_aperture_is_hard_edged_and_the_deficit_is_quantified():
     这个方向和量级要钉死，因为「我们的孔径是亚像素精确的」是评委三十秒就能
     验的说法，而一个诚实量化的 0.71% 是站得住的。
 
-    上下界 0.5%–1.0% 同时杀两种变异：把 `<=` 换成 `<` 实测给 1.274%（越界），
-    换成真正的亚像素加权则会把亏损压到远低于 0.5%。
+    **B-2 修正：这个 0.5%–1.0% 的带子钉的是「截断比例」，不是边缘处理方式。**
+    原 docstring 声称它也能排除真正的亚像素加权孔径，评审实测证伪：
+        photutils method="exact"（面积精确）-> 亏损 0.8877%   <- 落在带子里
+        photutils method="center"（等价于 `<`）-> 亏损 1.2740%  <- 越界
+        本实现（硬边缘 `<=`）              -> 亏损 0.7089%
+    物理根因：r=5、σ=1.6 即 3.125σ，二维高斯在该半径外的解析截断量本身就是
+    `exp(-r²/2σ²)` = **0.7576%**。也就是说这三种实现的亏损绝大部分来自
+    「孔径不够大」，边缘加权方式只贡献零点几个百分点的差异，所以带子容纳
+    0.888% 是必然的，不是缺陷。
+
+    **约束孔径形状的是 `test_aperture_flux_is_monotonic_in_radius`**：r=2 时
+    本实现给 8828.18，而 photutils exact 给 8477.54、center 给 6996.85，
+    三者在 rel=0.01 下互不兼容——小半径上边缘像素占比大，加权方式才显形。
+
+    按裁决 243，**不得**为了排除 0.888% 而收窄带子：那正是从两个测量值倒推
+    容差的做法。带子诚实地钉住截断量，形状由单调性测试钉。
     """
     img = make_image([(20.0, 30.0, 1000.0)])
     flux = aperture_flux(img, np.array([[20.0, 30.0]]))[0]
     deficit = (ANALYTIC_TOTAL - flux) / ANALYTIC_TOTAL
-    # 方向：硬边缘一定偏低，绝不会偏高。
+    # 方向：孔径只截取有限半径，一定偏低，绝不会偏高。
     assert flux < ANALYTIC_TOTAL
-    # 量级：实测 0.00709，钉在 0.005~0.010 之间。
+    # 量级：实测 0.00709，解析截断量 0.007576，钉在 0.005~0.010 之间。
     assert 0.005 < deficit < 0.010, f"实测亏损 {deficit:.5f} 不在预期的 0.5%~1.0% 区间"
 
 
 def test_aperture_flux_is_monotonic_in_radius():
-    """更大的孔径必须收到更多流量。实测 r=2 -> 8828.2、r=6 -> 16070.2。"""
+    """更大的孔径必须收到更多流量。实测 r=2 -> 8828.2、r=6 -> 16070.2。
+
+    B-2：**本测试是约束孔径形状（边缘加权方式）的那一条**，而不是那条
+    0.5%–1.0% 亏损带——后者钉的是截断比例，容纳面积精确孔径的 0.888%。
+    小半径上边缘像素占周长的比例大，加权方式才显形，实测 r=2：
+        本实现（硬边缘 `<=`）      -> 8828.18
+        photutils method="exact"  -> 8477.54
+        photutils method="center" -> 6996.85
+    三者在 rel=0.01 下互不兼容，所以这里的 r=2 断言能判别实现换代。
+    """
     img = make_image([(20.0, 30.0, 1000.0)])
     xy = np.array([[20.0, 30.0]])
     small = aperture_flux(img, xy, radius=2.0)[0]
@@ -264,7 +304,13 @@ def test_negative_clip_matters_on_a_noisy_fixture():
     **注意本测试钉的是实测的带 clip 坐标本身，不是"落在真值 0.05 内"**：
     在这个信噪比下带 clip 的结果距真值 (32.37, 29.62) 仍有 0.5547 px，
     任何能容纳 0.5547 又能排除无 clip 的 0.8789 的容差都是硬凑的。钉死实测
-    坐标既诚实又能决定性地杀掉变异 2。
+    坐标既诚实又能决定性地杀掉变异 2。（此偏离已由裁决 243 批准。）
+
+    **B-5：本测试唯一的守卫是上面那两条 ±1e-3 的坐标钉。** 变异 2（删掉
+    `np.clip`）使 x 变为 31.4911，偏离钉住值 0.3243，是 1e-3 容差的 **324 倍**。
+    最后那条 `< 0.6` 是**意图文档，不是守卫**：给定 ±1e-3 的钉，它的可达区间
+    只有 0.5537–0.5557，因此不可能失败。保留它是为了写明"截零让质心更靠近
+    真值"这个方向性事实，不要把它当成检验手段。
     """
     truth_x, truth_y = 32.37, 29.62
     rng = np.random.default_rng(5)
@@ -279,9 +325,11 @@ def test_negative_clip_matters_on_a_noisy_fixture():
     assert (patch < 0.0).sum() > 0, "fixture 没有负像素，无法守卫 clip"
 
     got = centroid_of_mass(img, np.array([[32.0, 30.0]]))
+    # 守卫：这两条钉死实测坐标，变异 2 会偏离 324 倍容差。
     assert got[0, 0] == pytest.approx(31.8153454494, abs=1e-3)
     assert got[0, 1] == pytest.approx(30.0751601927, abs=1e-3)
-    # 带 clip 的结果在 x 上比无 clip 更靠近真值：0.5547 对 0.8789。
+    # 文档，非守卫（B-5）：给定上面的 ±1e-3，可达区间仅 0.5537~0.5557，不可能失败。
+    # 记录的事实是：带 clip 的结果在 x 上比无 clip 更靠近真值，0.5547 对 0.8789。
     assert abs(got[0, 0] - truth_x) < 0.6
 
 
@@ -382,25 +430,50 @@ def test_remeasure_output_columns_are_independent_copies():
     原实现把 `x=xy[:, 0]`、`y=xy[:, 1]` 直接交给构造函数——那是
     `centroid_of_mass` 返回数组的视图——而 `elongation`、`npix` 却显式
     `.copy()`。同一个构造调用里混用副本与视图，对八个消费 SourceTable 的
-    下游任务是个陷阱：改写 out.x 会悄悄改到别处。
+    下游任务是个陷阱。
+
+    **下面四条 `base is None` 是本测试唯一的守卫，任何情况下都不要删。**
+    （B-1 修正：原 docstring 把强弱关系写反了，评审已实测证伪。）
+
+    理由：`xy[:, 0]` 与 `xy[:, 1]` 是同一个 `(N, 2)` 数组的**互不重叠**的两列，
+    实测 `np.shares_memory(xy[:, 0], xy[:, 1])` 为 False。所以写 `out.x[0]`
+    **永远不可能**碰到 `out.y`，也碰不到 `table.x`（后者另有一层：x 来自
+    `centroid_of_mass` 的返回值，那本身已是输入的副本）。评审实测：把 x/y 改回
+    视图、同时删掉这四行 `base is None`，整套 **23 项全绿**——裁决 31a 的变异
+    活了下来。
+
+    因此下面那三条行为断言是**契约文档，不是守卫**：它们描述"改一列不影响
+    另一列"这个下游可以依赖的性质，但在 x/y 取自同一数组的两列时它们不可能
+    失败。保留是为了写明意图，别把它们当成检验手段。
     """
     sources = [(20.2, 30.4, 1000.0), (45.2, 18.1, 600.0)]
     img = make_image(sources)
     table = make_table(sources)
     out = remeasure(img, table)
 
-    # x 与 y 必须互相独立（同一个 (N,2) 数组的两列会共享 base）。
+    # 唯一的守卫：每一列都必须自有内存，而不是别人的视图。
     assert out.x.base is None, "out.x 仍是某个数组的视图"
     assert out.y.base is None, "out.y 仍是某个数组的视图"
-    assert out.elongation.base is None
-    assert out.npix.base is None
+    assert out.elongation.base is None, "out.elongation 仍是某个数组的视图"
+    assert out.npix.base is None, "out.npix 仍是某个数组的视图"
 
-    # 行为层面的证据：改一列不能影响另一列，也不能影响输入表。
+    # 契约文档（见 docstring：以下三条在当前实现下不可能失败，不是守卫）。
     saved_y = out.y.copy()
     saved_input_x = table.x.copy()
     out.x[0] = -999.0
     assert np.array_equal(out.y, saved_y)
     assert np.array_equal(table.x, saved_input_x)
+
+    # B-4：elongation/npix 与输入表**是同一形状同一 dtype**，`base is None`
+    # 对它们是瞎的——`SourceTable.__post_init__` 的 `np.asarray` 在已经是
+    # float64/int64 连续数组上是恒等操作（实测返回同一对象、base 仍为 None）。
+    # 所以去掉 remeasure 里的 `.copy()` 后，输入输出会是**同一个数组**，
+    # 这时只有下面这种行为断言能抓到（与上面 x/y 的情形不同：那是兄弟列，
+    # 这里是同一块内存）。
+    out.elongation[0] = -1.0
+    assert table.elongation[0] == pytest.approx(1.05), "out.elongation 与输入表共享内存"
+    out.npix[0] = -7
+    assert table.npix[0] == 40, "out.npix 与输入表共享内存"
 
 
 def test_remeasure_handles_empty_table():
@@ -446,10 +519,26 @@ def test_signature_defaults_match_config(cfg):
 
 
 def test_detect_package_does_not_import_truth():
-    """真值隔离（硬约束）：src/detect/ 不得引入 src.validate.truth。"""
-    import src.detect.centroid as mod
+    """真值隔离（硬约束）：src/detect/ 不得引入 src.validate.truth。
+
+    B-6：原实现只读 `centroid.py` 一个文件，而 docstring 声称覆盖整个
+    `src/detect/`——于是 `segmentation.py` 实际无人看守。这是全仓库**唯一**
+    一条真值隔离测试，所以它必须遍历 `src/detect/` 下的每个 `*.py`。
+    真值 `.DAT` 只允许在校验/定标环节使用；探测环节若能读到真值，
+    整条流水线的复现率数字就失去意义。
+    """
     from pathlib import Path
 
-    source = Path(mod.__file__).read_text(encoding="utf-8")
-    assert "validate.truth" not in source
-    assert "validate import truth" not in source
+    import src.detect as pkg
+
+    package_dir = Path(pkg.__file__).parent
+    modules = sorted(package_dir.rglob("*.py"))
+    # 目录本身必须非空，否则这条测试会在什么都没查的情况下通过。
+    assert len(modules) >= 2, f"src/detect/ 下只找到 {len(modules)} 个模块，遍历可能失效"
+
+    for path in modules:
+        source = path.read_text(encoding="utf-8")
+        assert "validate.truth" not in source, f"{path.name} 引用了 src.validate.truth"
+        assert "validate import truth" not in source, (
+            f"{path.name} 从 src.validate 引入了 truth"
+        )
