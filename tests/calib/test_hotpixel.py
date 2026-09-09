@@ -184,8 +184,14 @@ def test_pixel_stats_chunking_is_exact(synthetic_cube):
     """分块计算逐像素 median / span 必须与整块计算逐位一致。
 
     分块存在的唯一理由是内存：np.median 会复制一份输入，30 帧 4096^2 的 uint16
-    立方体本身就是 1 GB，整块走会再多 1 GB。分块若算错，代价是错误的热像素图，
-    所以这里用 max_chunk_bytes=1（退化为逐行）与整块结果做逐位比对。
+    立方体本身就是 1 GB，整块走会再多 1 GB。分块若算错，代价是错误的热像素图。
+
+    这里比对三个块大小，缺一不可：
+    - `max_chunk_bytes=1` -> rows=1，逐行；
+    - 默认值 -> rows 被 ny 夹住，整块单次；
+    以上两者都是**退化**情形（rows==1 与 rows==ny），任何只在"块内多行且有残块"
+    时才犯的错都逃得掉。真实路径两者都不是：30x4096x4096 uint16 得 rows=1092、
+    4 块、残块 820 行。故补第三个中间块大小，见下。
     """
     cube, _ = synthetic_cube
     ref_med, ref_span = _pixel_stats(cube)
@@ -195,6 +201,66 @@ def test_pixel_stats_chunking_is_exact(synthetic_cube):
     # 同时钉住两个量的定义本身
     assert np.array_equal(ref_med, np.median(cube, axis=0))
     assert np.array_equal(ref_span, cube.max(axis=0) - cube.min(axis=0))
+
+
+def test_pixel_stats_chunking_with_ragged_tail(synthetic_cube):
+    """中间块大小 + 残块：复现真实路径的分块形状，而非 rows==1 / rows==ny 的退化情形。
+
+    _pixel_stats 里 rows = max_chunk_bytes // (n * nx * itemsize)。本 fixture 是
+    20 帧 128x128 float64，故 row_bytes = 20*128*8 = 20480；取
+    max_chunk_bytes = 20 * 20480 得 rows = 20。
+
+    **20 必须不能整除 128**：128 = 6*20 + 8，于是 7 块、最后一块只有 8 行——
+    这正是真实路径（4096 = 3*1092 + 820）的形状。请勿把 20 "整理"成 128 的整除数
+    （16、32、64），那会消掉残块，本用例也就退回半个退化情形。
+
+    没有这一档，下面这个变异能活过整套测试（含两个实数据用例）：
+        y1 = min(y0 + rows - 1, ny) if rows > 1 else min(y0 + rows, ny)
+    它在真实 4096 行路径上把第 1091、2183、3275 行整行漏写；实数据用例只是运气好
+    ——数据集 B 的 7 个缺陷行 (0, 3172-3175, 3206, 3207, 3209-3211, 3223) 没有一个
+    撞上这三行。配合 _pixel_stats 里把 np.empty 换成预填 NaN，漏写会直接变 NaN。
+    """
+    cube, _ = synthetic_cube
+    n, ny, nx = cube.shape
+    rows_wanted = 20
+    max_chunk_bytes = rows_wanted * n * nx * cube.dtype.itemsize
+    # 前置条件：块大小真的算出 rows=20，且 128 除不尽 20（残块 8 行、共 7 块）
+    assert max_chunk_bytes // (n * nx * cube.dtype.itemsize) == rows_wanted
+    assert ny % rows_wanted == 8
+    assert 1 < rows_wanted < ny, "必须落在 rows==1 与 rows==ny 两个退化端点之间"
+
+    ref_med, ref_span = _pixel_stats(cube)
+    med, span = _pixel_stats(cube, max_chunk_bytes=max_chunk_bytes)
+    assert not np.isnan(med).any(), "有行未被写入：分块循环漏了某些行"
+    assert not np.isnan(span).any(), "有行未被写入：分块循环漏了某些行"
+    assert np.array_equal(med, ref_med)
+    assert np.array_equal(span, ref_span)
+
+
+def test_pixel_stats_actually_splits_into_chunks(synthetic_cube, monkeypatch):
+    """分块必须真的发生：钉住块数与每块行数，而不只是"结果凑巧对"。
+
+    上面两个用例只比对结果，所以 `rows = ny`（彻底放弃分块）能活过它们——结果当然
+    还是对的，丢掉的是这个函数存在的唯一理由：峰值内存。直接断言峰值 RSS 会引入
+    与解释器、分配器相关的抖动，所以这里换一个确定性的等价观测：数 np.median 被调用
+    了几次、每次拿到多少行。max_chunk_bytes = 20 * 20*128*8 得 rows=20，
+    128 = 6*20 + 8 -> 6 个 20 行块 + 1 个 8 行残块。
+    """
+    cube, _ = synthetic_cube
+    n, ny, nx = cube.shape
+    max_chunk_bytes = 20 * n * nx * cube.dtype.itemsize
+
+    seen: list[int] = []
+    real_median = np.median
+
+    def spy(a, *args, **kwargs):
+        seen.append(np.shape(a)[1])
+        return real_median(a, *args, **kwargs)
+
+    monkeypatch.setattr(np, "median", spy)
+    _pixel_stats(cube, max_chunk_bytes=max_chunk_bytes)
+    assert seen == [20] * 6 + [8], f"应分成 6 个 20 行块 + 1 个 8 行残块，实为 {seen}"
+    assert sum(seen) == ny, "分块行数之和必须正好覆盖整幅图"
 
 
 def test_reject_hot_radius_controls_which_points_survive(synthetic_cube):
@@ -248,8 +314,31 @@ def test_reject_hot_with_no_clusters_keeps_all():
     assert reject_hot(xy, [], radius=8.0).all()
 
 
-def test_reject_hot_handles_empty_point_set():
-    keep = reject_hot(np.empty((0, 2)), [], radius=8.0)
+@pytest.mark.parametrize(
+    "empty_xy",
+    [
+        pytest.param(np.array([]), id="array-empty"),
+        pytest.param([], id="list-empty"),
+        pytest.param(np.empty((0,)), id="empty-1d"),
+        pytest.param(np.empty((0, 2)), id="empty-2d"),
+    ],
+)
+@pytest.mark.parametrize("with_clusters", [False, True], ids=["no-clusters", "with-clusters"])
+def test_reject_hot_handles_empty_point_set(empty_xy, with_clusters):
+    """四种"空点集"写法都必须返回长度 0 的 bool 数组。
+
+    只测 `np.empty((0, 2))` 是不够的：它过 `np.atleast_2d` 之后形状不变，本来就安全，
+    因此 reject_hot 里那句 `if xy.size == 0` 在它身上是死代码。另外三种
+    （`np.array([])`、`[]`、`np.empty((0,))`）过 atleast_2d 都变成形状 **(1, 0)**：
+    size 仍是 0，但 len() 是 1。删掉守卫后——有簇时 cKDTree.query 拿到 0 维点集直接
+    ValueError，无簇时更糟，会为 0 个点返回长度 1 的掩膜，静默把下游数组对齐搞错。
+    """
+    clusters = (
+        [HotCluster(cx=10.0, cy=10.0, npix=5, median_value=900.0, flat_ratio=0.01)]
+        if with_clusters
+        else []
+    )
+    keep = reject_hot(empty_xy, clusters, radius=8.0)
     assert keep.shape == (0,)
     assert keep.dtype == np.bool_
 
@@ -376,22 +465,136 @@ def _nearest(hpm, cx: float, cy: float) -> HotCluster:
     return best
 
 
-def test_dataset_b_reproduces_known_clusters(dataset_b_dir):
+@pytest.fixture(scope="module")
+def dataset_b_hpm(dataset_b_dir):
+    """数据集 B 帧 16-45 的热像素图，按模块缓存。
+
+    单次构建约 11 s（读 30 帧 4096^2 FITS）。下面有三个用例要断言同一张图的不同侧面
+    （已知簇位置、排序次序、`<` 边界约定），各自重建一次纯属浪费。
+    参数全取默认值，因此 src/config/default.yaml 的 hotpixel 节一漂移这些用例就会响。
+    """
     seq = FrameSequence.from_directory(dataset_b_dir)
-    hpm = build_from_sequence(seq, list(range(16, 46)))
+    return build_from_sequence(seq, list(range(16, 46)))
+
+
+def test_dataset_b_reproduces_known_clusters(dataset_b_hpm):
+    hpm = dataset_b_hpm
     _assert_expected_centers(hpm, "数据集 B")
 
     # (312, 3206.5) 是把 flat_ratio 从 0.05 提到 0.10 的直接原因：它实测 0.0743，
     # 在 0.05 下会被漏掉。这条断言让"为什么是 0.10"在阈值被改回时立刻显形。
     assert 0.05 < _nearest(hpm, 312.0, 3206.5).flat_ratio < 0.10
-    # 两个大簇必须成团，不能碎成单像素（在 flat_ratio=0.10 下实测 9 与 8 像素；
-    # 簇边缘有 ratio 恰为 0.1000 和 0.1085 的像素，阈值稍动 npix 就变 10/9，故只卡下界）
+    # 两个大簇必须成团，不能碎成单像素（在 flat_ratio=0.10 下实测 9 与 8 像素）
     assert _nearest(hpm, 327.0, 3210.1).npix >= 7
     assert _nearest(hpm, 244.1, 3173.6).npix >= 7
     # (0, 0) 是卡死的角点像素，正是 background_stats 在 frame 30 报出 max=26978 的来源
     assert _nearest(hpm, 0.0, 0.0).median_value > 20000.0
     # (2192, 3223) 单像素、中位值约 2612，远高于背景 6
     assert _nearest(hpm, 2192.0, 3223.0).median_value > 2000.0
+
+
+def test_dataset_b_clusters_are_sorted_by_size(dataset_b_hpm):
+    """簇次序必须是"按 npix 降序"，而不是 scipy.ndimage.label 的行序。
+
+    合成 fixture 见证不了这件事：label 按行序编号，而那里 2 像素簇本就在 1 像素簇
+    之前，label 次序恰好等于排序次序，删掉 build_hotpixel_map 里的 sort 也照过。
+    数据集 B 两者确实不同（实测 flat_ratio=0.10，帧 16-45）：
+        label 次序 : [(1, 0, 0), (8, 244.0, 3173.5), (2, 312.0, 3206.5),
+                      (9, 327.0, 3210.111), (1, 2192.0, 3223.0)]
+        排序后     : [(9, 327.0, ...), (8, 244.0, ...), (2, 312.0, ...),
+                      (1, 0.0, 0.0), (1, 2192.0, ...)]
+    报告与调试都依赖"最大的簇在最前"，故在此钉住。
+    """
+    npix = [c.npix for c in dataset_b_hpm.clusters]
+    assert npix == sorted(npix, reverse=True), f"簇未按 npix 降序：{npix}"
+    first, second = dataset_b_hpm.clusters[0], dataset_b_hpm.clusters[1]
+    assert (first.npix, round(first.cx), round(first.cy)) == (9, 327, 3210), (
+        f"首簇应为 (327, 3210.1) 的 9 像素簇，实为 "
+        f"({first.cx}, {first.cy}) npix={first.npix}"
+    )
+    assert (second.npix, round(second.cx), round(second.cy)) == (8, 244, 3174), (
+        f"次簇应为 (244.0, 3173.5) 的 8 像素簇，实为 "
+        f"({second.cx}, {second.cy}) npix={second.npix}"
+    )
+    # 同名的两个 1 像素簇按 cx 升序收尾，钉住排序键的第二项
+    tail = [(c.npix, c.cx) for c in dataset_b_hpm.clusters if c.npix == 1]
+    assert tail == [(1, 0.0), (1, 2192.0)], f"同 npix 时应按 cx 升序：{tail}"
+
+
+def test_dataset_b_flat_ratio_boundary_is_strict(dataset_b_hpm):
+    """`ratio < flat_ratio` 必须是严格小于：恰好等于阈值的像素不算热像素。
+
+    做功的像素是 **x=245, y=3174**：帧 16-45 实测 median 100.0、span 10.0，
+    ratio 恰为 0.100000000（十进制与二进制都精确，100 与 10 都是可精确表示的整数）。
+    它紧贴 (244.0, 3173.5) 那个 8 像素簇，所以 `<` 改 `<=` 的后果是可观测的：
+        `<`  -> 该簇 npix 8、质心 (244.0, 3173.5)，全图 seed 21 px、膨胀后 mask 57 px
+        `<=` -> 该簇 npix 9、质心 (244.111, 3173.556)，seed 22 px、mask 58 px，
+                且它与 (327, 3210.1) 同为 9 像素、cx 更小，会顶掉后者成为首簇
+    因此下面几条是精确等号而非下界——请勿"顺手"改成 >=：那正是被测的约定本身。
+    次近的边界像素是 x=326, y=3211，ratio 0.108527，离阈值有 8.5% 的裕度，
+    所以 0.10 这个取值本身并不卡在悬崖边上；卡在边上的只有 (245, 3174) 这一个。
+    """
+    big = _nearest(dataset_b_hpm, 244.1, 3173.6)
+    assert big.npix == 8, f"(244, 3173.5) 簇应为 8 像素（`<=` 会变 9），实为 {big.npix}"
+    assert big.cx == pytest.approx(244.0), f"质心应为 244.0（`<=` 会变 244.111），实为 {big.cx}"
+    assert big.cy == pytest.approx(3173.5), f"质心应为 3173.5（`<=` 会变 3173.556），实为 {big.cy}"
+    assert sum(c.npix for c in dataset_b_hpm.clusters) == 21, (
+        "全图 seed 像素应为 21（`<=` 会变 22）"
+        f"，实为 {sum(c.npix for c in dataset_b_hpm.clusters)}"
+    )
+    assert int(dataset_b_hpm.mask.sum()) == 57, (
+        f"dilate=1 后 mask 应为 57 像素（`<=` 会变 58），实为 {int(dataset_b_hpm.mask.sum())}"
+    )
+
+
+def test_pixel_exactly_at_brightness_threshold_is_excluded():
+    """`med > bkg_median + n_sigma * bkg_sigma` 必须是严格大于。
+
+    真数据挡不住这条变异：数据集 A/B 没有任何像素的时间轴中位值恰好落在阈值上，
+    所以 `>` 改 `>=` 活过整套实数据用例。这里用合成立方体把像素放在**精确**阈值上。
+    取 bkg_median=6.0、bkg_sigma=4.0、n_sigma=5.0，阈值 6+5*4 = 26.0，三个数都是
+    二进制精确值，乘加结果也精确，故 `med == 26.0` 判定不含浮点含糊。
+    两个像素一起测，否则"恰好在阈值上被排除"可能只是因为它根本不够亮：
+        (8, 8) 中位值 26.0    -> 必须被排除（`>=` 会收进来）
+        (8, 12) 中位值 26.0001 -> 必须被收入（证明这一档亮度确实够格）
+    两者 span 都是 0，flat_ratio 判据一定满足，唯一起作用的就是亮度比较。
+    """
+    thr = 6.0 + 5.0 * 4.0
+    assert thr == 26.0
+    cube = np.full((5, 16, 16), 6.0)
+    cube[:, 8, 8] = thr
+    cube[:, 8, 12] = thr + 1e-4
+    hpm = build_hotpixel_map(cube, bkg_median=6.0, bkg_sigma=4.0, n_sigma=5.0, dilate=0)
+    assert not hpm.mask[8, 8], "恰好等于亮度阈值的像素不得入选"
+    assert hpm.mask[8, 12], "略高于阈值的像素必须入选，否则上一条断言是空的"
+    assert hpm.mask.sum() == 1
+    assert [(c.cx, c.cy, c.npix) for c in hpm.clusters] == [(12.0, 8.0, 1)]
+
+
+def test_diagonal_neighbours_are_separate_clusters():
+    """连通性必须是 4 连通（scipy.ndimage.label 的默认结构元），不是 8 连通。
+
+    只对角相邻的两个热像素要算**两**簇。这不是随口定的约定：热像素成簇是因为读出
+    电路上物理相邻的单元一起漂，物理相邻在像素阵列上就是共边；只共角的两个像素更可能
+    是两个独立缺陷，并成一簇会让质心落在两者之间的正常像素上，reject_hot 反而按错的
+    中心去剔点。改成 `structure=np.ones((3, 3))` 后本用例得 1 簇、质心 (5.5, 5.5)。
+    （数据集 A/B 见证不了：那里的簇本来就都是共边连通的，8 连通同样给 5 簇。）
+    """
+    cube = np.full((5, 16, 16), 6.0)
+    cube[:, 5, 5] = 900.0
+    cube[:, 6, 6] = 900.0  # 与 (5, 5) 只共角
+    hpm = build_hotpixel_map(cube, bkg_median=6.0, bkg_sigma=3.8, dilate=0)
+    assert len(hpm.clusters) == 2, (
+        f"只共角的两像素应为 2 簇（8 连通会并成 1 簇），实为 {len(hpm.clusters)} 簇："
+        f"{[(c.cx, c.cy, c.npix) for c in hpm.clusters]}"
+    )
+    assert [(c.cx, c.cy, c.npix) for c in hpm.clusters] == [(5.0, 5.0, 1), (6.0, 6.0, 1)]
+    # 对照：改成共边相邻就必须并成一簇，证明本用例测的是连通性而非"永远不合并"
+    cube[:, 6, 6] = 6.0
+    cube[:, 5, 6] = 900.0
+    merged = build_hotpixel_map(cube, bkg_median=6.0, bkg_sigma=3.8, dilate=0)
+    assert len(merged.clusters) == 1
+    assert merged.clusters[0].npix == 2
 
 
 def test_dataset_a_reproduces_same_clusters(dataset_a_dir):

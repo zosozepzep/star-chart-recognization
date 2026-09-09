@@ -9,9 +9,13 @@
 按单像素处理会在簇边缘留下残点，进而被探测阶段当成高置信目标。
 
 实测结论（数据集 B 帧 16-45 与数据集 A 帧 5-35，相隔约 4.5 个月的两次独立观测）：
-flat_ratio=0.10 时两个数据集都给出同样 5 个簇、位置互差不超过 0.3 px——
-(0, 0)、(244.1, 3173.6)、(312.0, 3206.5)、(327.0, 3210.1)、(2192.0, 3223.0)。
+flat_ratio=0.10 时两个数据集都给出同样 5 个簇、位置互差不超过 0.25 px。
+按输出次序（npix 降序，同 npix 时 cx 升序）：
+    npix 9 (327.0, 3210.1)、8 (244.0, 3173.5)、2 (312.0, 3206.5)、
+    1 (0, 0)、1 (2192.0, 3223.0)
 其中 (0, 0) 中位值约 26982，正是全图统计里那个 max=26978 的来源。
+两个数据集都是 seed 21 像素、dilate=1 后 mask 57 像素。完整实测表见
+docs/reports/measurements.md 的热像素节。
 
 flat_ratio 取 0.10 而非最初设想的 0.05，是因为 0.05 会漏掉 (312, 3206.5)——它实测
 0.0743，但中位值 134（背景 6）且在两个数据集同一像素复现，是无可争议的真缺陷。
@@ -82,8 +86,12 @@ def _pixel_stats(
     但显式转换后这份代码对任何输入 dtype 都是安全的。
     """
     n, ny, nx = cube.shape
-    med = np.empty((ny, nx), dtype=np.float64)
-    span = np.empty((ny, nx), dtype=np.float64)
+    # 预填 NaN 而非 np.empty：分块循环若漏写某几行，np.empty 留下的是上一次分配的
+    # 残留内存——数量级往往看着像正常像素值，判据照样跑得出"合理"结果，缺陷完全无声。
+    # 填 NaN 让任何漏写立刻显形（NaN 参与比较恒为假，且与整块参考比对必然不相等）。
+    # 代价是每次调用多一遍 4096^2 float64（约 134 MB）的写入，相对实测 1.76 GiB 峰值可忽略。
+    med = np.full((ny, nx), np.nan, dtype=np.float64)
+    span = np.full((ny, nx), np.nan, dtype=np.float64)
 
     row_bytes = max(int(n) * int(nx) * cube.dtype.itemsize, 1)
     rows = max(int(max_chunk_bytes) // row_bytes, 1)
@@ -121,8 +129,21 @@ def build_hotpixel_map(
     with np.errstate(divide="ignore", invalid="ignore"):
         ratio = np.where(med > 0, span / med, np.inf)
 
+    # 两条判据都是**严格**比较，各由一个用例看守：
+    # `med > thr`：恰好等于阈值的像素不算热像素
+    #     (test_pixel_exactly_at_brightness_threshold_is_excluded，合成——真数据没有
+    #      任何像素中位值恰在阈值上，改成 >= 活过全部实数据用例)
+    # `ratio < flat_ratio`：极差比恰好等于 flat_ratio 的像素不算热像素
+    #     (test_dataset_b_flat_ratio_boundary_is_strict——数据集 B 的 x=245,y=3174
+    #      中位值 100.0、极差 10.0，ratio 恰为 0.100000，改成 <= 会让相邻那个 8 像素
+    #      簇变 9 像素、质心从 (244.0, 3173.5) 移到 (244.111, 3173.556))
     seed = (med > bkg_median + n_sigma * bkg_sigma) & (ratio < flat_ratio)
 
+    # 4 连通（label 的默认结构元），刻意不用 8 连通：热像素成团源于读出电路上物理
+    # 相邻的单元一起漂，物理相邻即共边。只共角的两个像素更可能是两个独立缺陷，并成
+    # 一簇会把质心推到两者之间的正常像素上，reject_hot 就按错的中心去剔点。
+    # 实测数据集 A/B 两种连通性都给 5 簇（那里的簇本来就共边连通），故此约定由
+    # test_diagonal_neighbours_are_separate_clusters 用合成用例看守。
     labels, n = label(seed)
     clusters: list[HotCluster] = []
     for k in range(1, n + 1):
@@ -223,6 +244,10 @@ def reject_hot(
     """返回布尔保留掩膜：距任一热像素簇中心不超过 radius 的点被剔除。
 
     xy 为 (N, 2) float64 的 [x, y] 点集，返回长度为 N 的 bool 数组。
+
+    空点集必须显式早退。`np.array([])` / `[]` / `np.empty((0,))` 过 atleast_2d 后
+    形状都是 **(1, 0)**：size 为 0 但 len() 是 1，于是有簇时 cKDTree.query 直接
+    ValueError，无簇时更隐蔽——会为 0 个点返回长度 1 的掩膜，静默错位下游数组。
     """
     xy = np.atleast_2d(np.asarray(xy, dtype=np.float64))
     if xy.size == 0:
