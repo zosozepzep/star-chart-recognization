@@ -1,10 +1,28 @@
-version: '3.8' #向下兼容
-
 services:
-  cv-gpu:
-    build: .
-    image: opencv_gpu_env:v1
-    container_name: opencv_gpu_env
+  cpu:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.cpu
+    image: star-chart:cpu
+    container_name: star_chart_cpu
+    working_dir: /workspace
+    environment:
+      PYTHONPATH: /workspace
+      MPLBACKEND: Agg
+    volumes:
+      - .:/workspace
+    command: tail -f /dev/null
+
+  gpu:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.gpu
+    image: star-chart:gpu
+    container_name: star_chart_gpu
+    working_dir: /workspace
+    environment:
+      PYTHONPATH: /workspace
+      MPLBACKEND: Agg
     volumes:
       - .:/workspace
     deploy:
@@ -14,3 +32,4 @@ services:
             - driver: nvidia
               count: all
               capabilities: [gpu]
+    command: tail -f /dev/null

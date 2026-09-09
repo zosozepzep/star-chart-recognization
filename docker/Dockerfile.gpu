@@ -26,4 +26,10 @@ RUN apt-get update && apt-get install -y source-extractor
 RUN pip install pandas
 RUN pip install cupy-cuda13x
 RUN pip install --upgrade llvmlite numba
+
+RUN apt-get update && apt-get install -y --no-install-recommends fonts-noto-cjk \
+    && rm -rf /var/lib/apt/lists/*
+COPY requirements.txt /tmp/requirements.txt
+RUN pip install --no-cache-dir -r /tmp/requirements.txt
+
 CMD ["tail", "-f", "/dev/null"]

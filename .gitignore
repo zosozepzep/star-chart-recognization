@@ -10,3 +10,13 @@ output/**/*
 src/pycache/*
 /src/__pycache__
 .obsidian/
+
+# Byte-compiled
+__pycache__/
+*.py[cod]
+
+# 本地临时探针脚本
+_probe/
+
+# 根目录散落的截图
+/*.jpg
