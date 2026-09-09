@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
+from astropy.io import fits
 
 from src.dataio.fits_loader import (
     FrameSequence,
@@ -10,6 +11,20 @@ from src.dataio.fits_loader import (
     parse_pointing,
     read_header,
 )
+
+
+def _write_fits(path, date_obs: str, fill: int) -> None:
+    """写一个最小可用的合成 FITS：头部字段齐全，像素为常量便于区分。"""
+    data = np.full((4, 4), fill, dtype=np.int16)
+    hdr = fits.Header()
+    hdr["DATE-OBS"] = date_obs
+    hdr["AZIMUTH"] = "0270.28456 0000.00000"
+    hdr["ELEVATIO"] = "0015.24484 0000.00000"
+    hdr["EXPOSURE"] = "0000          00080"
+    hdr["SITELONG"] = 88.34380
+    hdr["SITELATI"] = 43.31200
+    hdr["SITEALTI"] = 1801.0
+    fits.PrimaryHDU(data=data, header=hdr).writeto(path)
 
 
 @pytest.mark.parametrize(
@@ -88,5 +103,45 @@ def test_sequence_dataset_a_has_no_truth(dataset_a_dir):
 
 def test_sequence_image_matches_direct_load(dataset_b_dir):
     seq = FrameSequence.from_directory(dataset_b_dir)
-    direct = load_image(seq.headers[3].path)
+    # 期望路径独立于 seq 推导，否则断言退化为 load_image(p) == load_image(p)
+    expected_path = sorted(dataset_b_dir.glob("*.fits"))[3]
+    direct = load_image(expected_path)
     assert np.array_equal(seq.image(3), direct)
+    # 若 image() 忽略 index（常量索引 bug），下面这条会失败
+    assert not np.array_equal(seq.image(3), seq.image(4))
+
+
+def test_from_directory_reorders_and_reindexes(tmp_path):
+    """文件名次序与时间次序相反时，序列必须按时间重排并重编 index。"""
+    # b_first.fits 文件名在前，但观测时间在后
+    _write_fits(tmp_path / "b_first.fits", "2026-07-21T17:26:30.000", fill=20)
+    _write_fits(tmp_path / "a_second.fits", "2026-07-21T17:26:29.000", fill=10)
+
+    seq = FrameSequence.from_directory(tmp_path)
+    assert [h.path.name for h in seq.headers] == ["a_second.fits", "b_first.fits"]
+    assert [h.index for h in seq.headers] == [0, 1]
+    assert seq.image(0)[0, 0] == pytest.approx(10.0)
+    assert seq.image(1)[0, 0] == pytest.approx(20.0)
+    assert seq.cadence_s() == pytest.approx(1.0)
+
+
+def test_from_directory_raises_without_fits(tmp_path):
+    with pytest.raises(FileNotFoundError):
+        FrameSequence.from_directory(tmp_path)
+
+
+def test_from_directory_raises_on_multiple_truth_files(tmp_path):
+    _write_fits(tmp_path / "f0.fits", "2026-07-21T17:26:29.000", fill=10)
+    (tmp_path / "one.DAT").write_text("")
+    (tmp_path / "two.DAT").write_text("")
+    with pytest.raises(ValueError, match="多个真值文件"):
+        FrameSequence.from_directory(tmp_path)
+
+
+def test_cadence_s_raises_on_single_frame(tmp_path):
+    """单帧序列的帧间隔是显式错误，不是 nan。"""
+    _write_fits(tmp_path / "only.fits", "2026-07-21T17:26:29.000", fill=10)
+    seq = FrameSequence.from_directory(tmp_path)
+    assert len(seq) == 1
+    with pytest.raises(ValueError, match="少于 2 帧"):
+        seq.cadence_s()

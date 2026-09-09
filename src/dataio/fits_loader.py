@@ -9,7 +9,7 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import numpy as np
@@ -63,7 +63,7 @@ def read_header(path: str | Path, index: int) -> FrameHeader:
         return FrameHeader(
             index=index,
             path=path,
-            date_obs=Time(str(hdr["DATE-OBS"]).strip(), scale="utc"),
+            date_obs=Time(str(hdr["DATE-OBS"]).strip(), format="isot", scale="utc"),
             azimuth_deg=parse_pointing(hdr["AZIMUTH"]),
             elevation_deg=parse_pointing(hdr["ELEVATIO"]),
             exposure_ms=parse_exposure_ms(hdr["EXPOSURE"]),
@@ -74,7 +74,11 @@ def read_header(path: str | Path, index: int) -> FrameHeader:
 
 
 def load_image(path: str | Path) -> np.ndarray:
-    """读取像素数据为 float64。BITPIX=16 + BZERO=0 表示无符号短整型。"""
+    """读取像素数据为 float64。
+
+    BITPIX=16 + BZERO=0 → astropy 返回有符号 >i2（上限 32767）；
+    本数据集实测最大 28190，未接近溢出。
+    """
     with fits.open(Path(path)) as hdul:
         hdul.verify("silentfix")
         return np.asarray(hdul[0].data, dtype=np.float64)
@@ -95,22 +99,18 @@ class FrameSequence:
         if not files:
             raise FileNotFoundError(f"目录中没有 FITS 文件: {directory}")
         headers = [read_header(p, i) for i, p in enumerate(files)]
-        order = np.argsort([h.date_obs.unix for h in headers])
+        # stable 排序：DATE-OBS 相同时保留上面按文件名建立的次序
+        order = np.argsort([h.date_obs.unix for h in headers], kind="stable")
         headers = [
-            FrameHeader(
-                index=new_index,
-                path=headers[old].path,
-                date_obs=headers[old].date_obs,
-                azimuth_deg=headers[old].azimuth_deg,
-                elevation_deg=headers[old].elevation_deg,
-                exposure_ms=headers[old].exposure_ms,
-                site_lon_deg=headers[old].site_lon_deg,
-                site_lat_deg=headers[old].site_lat_deg,
-                site_alt_m=headers[old].site_alt_m,
-            )
+            replace(headers[old], index=new_index)
             for new_index, old in enumerate(order)
         ]
         dats = sorted(directory.glob("*.DAT")) + sorted(directory.glob("*.dat"))
+        dats = sorted(set(dats))
+        if len(dats) > 1:
+            raise ValueError(
+                f"目录中存在多个真值文件，无法判定使用哪一个: {[p.name for p in dats]}"
+            )
         return cls(
             dataset_id=directory.name,
             directory=directory,
@@ -128,5 +128,9 @@ class FrameSequence:
         return Time([h.date_obs for h in self.headers])
 
     def cadence_s(self) -> float:
-        """帧间隔中位数（秒）。"""
+        """帧间隔中位数（秒）。单帧序列无间隔可言，显式报错而非返回 nan。"""
+        if len(self.headers) < 2:
+            raise ValueError(
+                f"序列少于 2 帧，无法计算帧间隔: n={len(self.headers)}"
+            )
         return float(np.median(np.diff(self.times().unix)))
