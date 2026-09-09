@@ -57,11 +57,23 @@ def test_default_config_has_required_sections():
         assert section in conf, f"缺少配置段: {section}"
 
 
-def test_load_config_returns_independent_copy():
+def test_load_config_returns_independent_copy(monkeypatch):
+    """即使底层 YAML 结果被复用（未来若加缓存），返回值也必须是独立深拷贝。
+
+    直接调用两次 load_config 无法验证这一点——yaml.safe_load 每次都会构造全新对象图，
+    所以去掉 deepcopy 该断言依然通过。这里把一个共享 dict 作为解析结果注入，
+    让 deepcopy 成为唯一能保证隔离的环节。
+    """
+    import src.config as config_module
+
+    shared = {"detect": {"report_n_sigma": 5.0}}
+    monkeypatch.setattr(config_module.yaml, "safe_load", lambda fh: shared)
+
     a = load_config()
     b = load_config()
     a["detect"]["report_n_sigma"] = 99.0
     assert b["detect"]["report_n_sigma"] == 5.0
+    assert shared["detect"]["report_n_sigma"] == 5.0
 
 
 def test_detect_thresholds_are_two_tiered():

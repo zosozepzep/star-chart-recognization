@@ -17,9 +17,16 @@ RUN apt-get update && apt-get install -y \
 # 将系统 python3 链接为 python
 RUN ln -s /usr/bin/python3 /usr/bin/python
 
+# 先按 requirements.txt 钉住核心科学计算栈的版本，再装 torch / cupy 等重型轮子。
+# 顺序很重要：若先装 torch/cupy 再回头安装 numpy==2.2.6，会把 numpy 换到已编译扩展
+# 的脚下，触发 "numpy.dtype size changed" 这类硬 ImportError，而全局约束要求
+# GPU 缺失时静默回退到 CPU，而不是抛异常。
+RUN pip install --upgrade pip
+COPY requirements.txt /tmp/requirements.txt
+RUN pip install --no-cache-dir -r /tmp/requirements.txt
+
 # 安装带 CUDA 支持相关的包
-RUN pip install --upgrade pip && \
-    pip install opencv-python numpy torch torchvision
+RUN pip install opencv-python numpy torch torchvision
 RUN pip install astropy matplotlib
 RUN pip install photutils scipy
 RUN apt-get update && apt-get install -y source-extractor
@@ -29,7 +36,5 @@ RUN pip install --upgrade llvmlite numba
 
 RUN apt-get update && apt-get install -y --no-install-recommends fonts-noto-cjk \
     && rm -rf /var/lib/apt/lists/*
-COPY requirements.txt /tmp/requirements.txt
-RUN pip install --no-cache-dir -r /tmp/requirements.txt
 
 CMD ["tail", "-f", "/dev/null"]
