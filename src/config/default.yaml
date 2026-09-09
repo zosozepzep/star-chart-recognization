@@ -15,7 +15,7 @@ background:
 
 hotpixel:
   n_sigma: 5.0
-  flat_ratio: 0.05          # (max-min)/median 上限，判"数值锁定"
+  flat_ratio: 0.10          # (max-min)/median 上限，判"数值锁定"；取自实测平台中部：0.07~0.15 均给出同样 5 簇，0.05 只给 4 簇（漏 (312,3206)），0.20 跳到 18 簇、0.30 跳到 242 簇
   dilate: 1                 # 簇整体膨胀像素数
   reject_radius_px: 8.0     # 探测结果剔除半径
   max_frames: 40            # 时间轴统计所用最大帧数（内存约束）
