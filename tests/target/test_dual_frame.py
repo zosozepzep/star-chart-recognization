@@ -76,12 +76,19 @@ def static_det_moving_sky(n_frames: int, *, step_det: float = 0.0, step_sky: flo
     return xy_det, xy_sky
 
 
-@pytest.fixture()
-def synthetic_scene():
-    """30 帧：星场每帧移动 126 px，1 个探测器系近静止的目标，3 个热像素残点。
+def _build_scene(*, second_target: bool):
+    """30 帧：星场每帧移动 126 px，探测器系近静止的目标，3 个热像素残点。
 
     目标在探测器系每帧漂移 1.8 px（与数据集 B 实测一致），恒星在探测器系
     每帧漂移 126 px。热像素残点在探测器系严格不动。
+
+    ``second_target=True`` 时另加两个源，使轨迹长度不再全部相同——
+    `synthetic_scene` 的四条轨迹实测**全都是长度 30**，在那上面断言排序会退化成
+    恒真式。加的两个源是：第 10 帧进场的第二个目标（长度 20），以及 f0–f14 只存在
+    15 帧就消失的静止点。后者是必需的：只有第二个目标时播种顺序本身就恰好是
+    降序（f0 先给出四条长度 30，f10 再给出长度 20），删掉 `tracks.sort` 也测不出
+    来；加上这个 f0 播种、长度 15 的源后，播种顺序变成
+    ``[30, 30, 30, 30, 15, 20]``，不再是降序。
     """
     rng = np.random.default_rng(31)
     frames = list(range(30))
@@ -99,11 +106,39 @@ def synthetic_scene():
         flux = np.concatenate(
             [np.full(inside.sum(), 1500.0), [264.0 + 38.0 * i], np.full(3, 900.0)]
         )
+        if second_target:
+            if i <= 14:  # short-lived static point, seeded at f0, length 15
+                xy = np.vstack([xy, [[700.0, 500.0]]])
+                flux = np.concatenate([flux, [900.0]])
+            if i >= 10:  # second target, enters at f10, length 20
+                xy = np.vstack([xy, [[1500.0 + 1.7 * (i - 10), 2600.0 + 0.4 * (i - 10)]]])
+                flux = np.concatenate([flux, [1200.0]])
         detections[i] = as_table(xy, i, flux)
     # frames is ascending and contiguous — register_sequence does not check this
     # (Ruling 335 Minor 4) and would silently produce garbage otherwise.
     registration = register_sequence(detections, frames, reference=0)
     return frames, detections, registration
+
+
+@pytest.fixture()
+def synthetic_scene():
+    """One moving target (length 30) plus three static hot pixels."""
+    return _build_scene(second_target=False)
+
+
+@pytest.fixture()
+def two_target_scene():
+    """Same scene plus a second target at f10 and a short-lived point at f0-f14.
+
+    Measured: ``build_tracks`` returns lengths ``[30, 30, 30, 30, 20, 15]`` from a
+    seeding order of ``[30, 30, 30, 30, 15, 20]``, and ``find_targets`` returns 2
+    hits in order ``[30, 20]``. A separate fixture is used deliberately — several
+    tests assert ``== 4`` tracks and exactly 1 hit against ``synthetic_scene``,
+    and those assertions are correct as they stand.
+    """
+    return _build_scene(second_target=True)
+
+
 
 
 def test_build_tracks_finds_stationary_track(synthetic_scene):
@@ -461,12 +496,113 @@ def test_no_source_is_claimed_by_two_tracks(synthetic_scene):
             seen[key] = n_track
 
 
-def test_build_tracks_returns_descending_length_order(synthetic_scene):
-    """``find_targets`` relies on this ordering for its output order."""
-    frames, detections, reg = synthetic_scene
+def test_build_tracks_returns_descending_length_order(two_target_scene):
+    """``find_targets`` relies on this ordering for its output order.
+
+    Uses the two-target fixture on purpose: ``synthetic_scene``'s four tracks are
+    all exactly length 30, so ``lengths == sorted(lengths, reverse=True)`` holds
+    for ascending order too and pins nothing. Here the lengths are
+    ``[30, 30, 30, 30, 20, 15]`` from a seeding order of
+    ``[30, 30, 30, 30, 15, 20]`` — so this fails both if the sort is reversed and
+    if it is removed entirely.
+    """
+    frames, detections, reg = two_target_scene
     tracks = build_tracks(detections, frames, reg, radius=8.0, min_frames=10)
     lengths = [t.length for t in tracks]
+    assert lengths == [30, 30, 30, 30, 20, 15]
+    assert lengths != sorted(lengths), "fixture must not be length-degenerate"
     assert lengths == sorted(lengths, reverse=True)
+
+
+def test_find_targets_orders_hits_by_descending_length(two_target_scene):
+    """``hits.sort`` is unpinned on a one-hit fixture; this one yields two.
+
+    Note that *removing* ``hits.sort`` is an equivalent mutant rather than a test
+    gap: ``hits`` is a filter of ``tracks``, ``build_tracks`` already returns them
+    descending, and a subsequence of a descending list is descending. Reversing
+    the sort is not equivalent and this test catches it.
+    """
+    frames, detections, reg = two_target_scene
+    verdicts = find_targets(detections, frames, reg)
+    assert [v.track.length for v in verdicts] == [30, 20]
+    assert [v.track.start for v in verdicts] == [0, 10]
+    assert all(v.is_target for v in verdicts)
+
+
+
+# --------------------------------------------------------------------------
+# The length-1 guard in _step_median.
+# --------------------------------------------------------------------------
+
+
+def test_single_frame_track_has_zero_speeds_and_stays_json_safe():
+    """``_step_median``'s ``len(xy) < 2`` guard is reachable from the public API.
+
+    Without it ``np.median(np.diff(one_row))`` is ``nan`` (plus two
+    ``RuntimeWarning``s), and that ``nan`` makes **both** speed criteria silently
+    fail (``nan > 8.0`` is False, ``nan < 30.0`` is False), so ``classify``
+    appends no speed reason at all. ``to_dict``'s ``v_det_px_per_frame`` /
+    ``v_sky_px_per_frame`` have no ``isfinite`` coercion — unlike
+    ``stationarity_contrast`` — so ``json.dumps(..., allow_nan=False)`` raises
+    ``ValueError``.
+
+    Length-1 tracks are constructible through the public API: measured,
+    ``find_targets(..., config={"min_track_frames": 1})`` builds 3984 of them on
+    the synthetic scene.
+
+    The hazard is conditional, not realised: a length-1 track's ``max`` and
+    ``min`` are the same row, so its span is exactly (0, 0) and its norm exactly
+    0, hence it is always ``pixel_locked`` for any ``lock_span_px > 0`` and
+    ``find_targets`` — which returns hits only — never emits it. Reaching the
+    report needs a consumer that serialises *rejected* verdicts too, and how
+    Task 30 consumes this dict is not yet decided.
+    """
+    track = make_track([[244.0, 3174.0]], [[900.0, 3174.0]], frames=[5])
+    assert track.length == 1
+    assert track.v_det_px == 0.0
+    assert track.v_sky_px == 0.0
+
+    verdict = classify(track)
+    assert verdict.v_det_px == 0.0
+    assert verdict.v_sky_px == 0.0
+    assert not verdict.is_target
+    assert verdict.pixel_locked  # span is exactly (0, 0)
+
+    payload = verdict.to_dict()
+    assert payload["v_det_px_per_frame"] == 0.0
+    assert payload["v_sky_px_per_frame"] == 0.0
+    json.dumps(payload, allow_nan=False)
+
+
+# --------------------------------------------------------------------------
+# find_targets must actually read all five config keys (Ruling 264's hole).
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "key, value",
+    [
+        ("v_det_max_px", 0.5),
+        ("v_sky_min_px", 1e9),
+        ("lock_span_px", 1e9),
+        ("track_radius_px", 0.001),
+        ("min_track_frames", 999),
+    ],
+)
+def test_find_targets_reads_each_config_key(synthetic_scene, key, value):
+    """Each key, on its own, must be able to drive the one hit to zero.
+
+    ``test_config_default_matches_the_code_default`` pins that the YAML carries
+    the right key names; nothing pinned that ``find_targets`` reads them. Ruling
+    264 predicted exactly this hole — misspelling any of the five silently falls
+    back to the default and every test that calls ``classify`` directly still
+    passes. Parametrised rather than bundled into one test on purpose: a single
+    test asserting all five at once would still pass if only some keys were
+    fixed.
+    """
+    frames, detections, reg = synthetic_scene
+    assert len(find_targets(detections, frames, reg)) == 1
+    assert find_targets(detections, frames, reg, config={key: value}) == []
 
 
 # --------------------------------------------------------------------------

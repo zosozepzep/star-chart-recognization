@@ -135,6 +135,33 @@ class Track:
         return float((peak.max() - peak.min()) / median)
 
     def _step_median(self, xy: np.ndarray) -> float:
+        """逐帧位移的**中位数**。长度不足 2 时返回 0.0。
+
+        取中位数而非均值或首尾距离/N，是因为中位数不受单帧坏点影响。实测数据集 B
+        的目标逐帧位移散布在 0.68–3.21 px（σ = 0.52，53 步），中位数 1.8440、
+        均值 1.8497、首尾/N 1.8077 三者相差 2.2%，天球系一侧同为 126.0959 /
+        125.7334 / 125.7218。`v_det_max` 与 `v_sky_min` 两个门限都是按中位数这个
+        统计量校准的；三种统计量下所有余量都在 4.19 倍以上，所以没有任何判决取决于
+        这个选择——但门限的校准口径是中位数，换统计量必须重测。
+
+        `len(xy) < 2` 的守卫不是死代码，尽管默认参数下到不了：`np.diff` 在单行输入
+        上给出空数组，`np.median([])` 返回 `nan` 并发两条 `RuntimeWarning`，而 `nan`
+        会让**两条**速度判据同时静默失效（`nan > 8.0` 为 False，`nan < 30.0` 也为
+        False），于是 `classify` 一条速度理由都不追加，`to_dict` 的
+        `v_det_px_per_frame` / `v_sky_px_per_frame` 也带着 `nan` 出去——这两个字段
+        没有 `stationarity_contrast` 那样的 `isfinite` 强转，
+        `json.dumps(..., allow_nan=False)` 会抛 `ValueError`。
+
+        长度 1 的轨迹从公开接口就能造出来：`find_targets(..., config=
+        {"min_track_frames": 1})` 在合成场景上产生 3984 条长度 1 的轨迹。
+
+        需要说清这个隐患的**条件性**，不要夸大：长度 1 的轨迹只有一行 `xy_det`，
+        `max` 与 `min` 同行，跨度恰为 (0, 0)、范数恰为 0，因此只要 `lock_span_px > 0`
+        它**必然** `pixel_locked` → `is_target=False` → `find_targets` 只返回命中项，
+        永远不会把它吐出去（实测 `min_track_frames=1` 时仍只有 1 个命中）。`nan` 要
+        真的进到报告里，需要一个把**被拒**判决也一并序列化的消费方，而 Task 30 会怎么
+        消费这个字典尚未定。守卫仍然要留：它成本为零，且把隐患挡在产生端。
+        """
         if len(xy) < 2:
             return 0.0
         d = np.diff(xy, axis=0)
