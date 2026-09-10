@@ -72,10 +72,20 @@ def test_vote_returns_zero_on_unrelated_fields():
 
 
 def test_vote_returns_empty_shapes_below_min_points():
-    """< 3 points on either side must early-return (0, 2)-shaped arrays, not just n=0.
+    """The ``len < 3`` guard, plus the ``(0, 2)`` shape contract on every empty return.
 
     A caller doing ``a.shape == b.shape == (n, 2)`` (as
     ``test_vote_finds_correspondences`` does) depends on the shape, not just the count.
+
+    The asymmetric 2-vs-50 case below is the only one here that actually covers the
+    guard. Measured: with the guard deleted, the symmetric 0x0 / 1x1 / 2x2 / 3x3 cases
+    all still return ``(0, 2), (0, 2), 0`` -- unchanged -- because ``keep.sum() < 10``
+    short-circuits every one of the 61 rotation steps (2x2 yields 4 candidate pairs,
+    3x3 yields 9, both under 10), so the vote falls through to the ``votes <= 0``
+    return instead. Only an asymmetric pair produces enough candidates to reach the
+    histogram: 2x50 gives 100, and with the guard deleted it returns n=1 (a spurious
+    single match) rather than 0. The seed is pinned because only 5 of 200 seeds expose
+    this (21, 30, 69, 84, 117) -- a random seed would make the test flaky.
     """
     rng = np.random.default_rng(9)
     src = rng.uniform(0.0, 4096.0, size=(2, 2))
@@ -85,12 +95,27 @@ def test_vote_returns_empty_shapes_below_min_points():
     assert a.shape == (0, 2)
     assert b.shape == (0, 2)
 
+    # 3 points either side passes the len < 3 guard and returns empty via the
+    # `votes <= 0` path instead (9 candidate pairs < the keep.sum() < 10 floor).
+    # Kept for the shape contract on that second empty-return path, not for the guard.
     src3 = rng.uniform(0.0, 4096.0, size=(3, 2))
     dst3 = rng.uniform(0.0, 4096.0, size=(3, 2))
     a3, b3, n3 = vote_correspondences(src3, dst3, **VOTE_KW)
     assert n3 == 0
     assert a3.shape == (0, 2)
     assert b3.shape == (0, 2)
+
+    # This is the assertion that witnesses the guard: 2 src points against 50 dst
+    # points give 100 candidate pairs, clearing keep.sum() < 10, so without the guard
+    # the histogram runs and yields a spurious n=1 from 2 points -- far too few for
+    # fit_similarity's 4 parameters.
+    rng_asym = np.random.default_rng(21)
+    src_few = rng_asym.uniform(200.0, 3900.0, size=(2, 2))
+    dst_many = rng_asym.uniform(200.0, 3900.0, size=(50, 2))
+    a4, b4, n4 = vote_correspondences(src_few, dst_many, **VOTE_KW)
+    assert n4 == 0
+    assert a4.shape == (0, 2)
+    assert b4.shape == (0, 2)
 
 
 def test_solve_pair_recovers_transform():
@@ -329,6 +354,17 @@ def test_dataset_b_registration_matches_measured_baseline(dataset_b_dir):
     # 其余 53 个 pair 全部健康：实测 0.6229-0.8322
     assert max(q["rms_px"] for q in pairs[1:]) < 1.0
     assert rep["rms_median_px"] < 1.0            # 实测 0.7363
+    # 这条等式钉住的是「rms_max_px 来自段首 pair」这一归因本身，而不只是一个数值。
+    # 它也是 Step 5 变异 9（把 rms_max_px 改成取 pairs[1:] 的最大值）唯一抓得到的
+    # 断言——旧的 `rms_max_px < 1.5` 在那个变异下反而会变绿。
+    #
+    # 已知预算（保留该断言是控制器裁定，但代价要写明）：这实际上给段首 pair 隐含
+    # 加了 0.8322 的**下界**——一旦段首 rms 改进到低于其余 53 对的最好值 0.8322，
+    # rms_max_px 就会变成 pairs[1:] 的最大值，这条等式随即变红。当前余量只有
+    # 0.07 px（0.9 - 0.8322）。届时改成
+    # `rep["rms_max_px"] == pytest.approx(max(q["rms_px"] for q in pairs))`
+    # 可以解耦，但那样它退化成恒真断言（max 的定义），必须换别的方式重新钉住归因，
+    # 而不是删掉了事。
     assert rep["rms_max_px"] == pytest.approx(pairs[0]["rms_px"])
     assert rep["inliers_min"] >= 50              # 实测 74
     cum = decompose(result.matrices[seg.end])
