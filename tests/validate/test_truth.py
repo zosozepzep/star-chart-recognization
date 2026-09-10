@@ -129,6 +129,26 @@ def test_load_truth_rejects_wrong_column_count(tmp_path):
         load_truth(p)
 
 
+def test_load_truth_rejects_empty_file_with_honest_message(tmp_path):
+    """Ruling 352：空文件的诊断必须说"空"，不能说"实际 1 列"。
+
+    ``np.loadtxt(..., ndmin=2)`` gives an empty file ``shape (0, 1)`` (measured),
+    so without the ``raw.size == 0`` branch the column guard reports "实际 1 列"
+    for a file that has no columns at all. The assertion below pins the *message*,
+    not merely the exception type — the pre-fix code raised ``ValueError`` too.
+    """
+    p = tmp_path / "empty.DAT"
+    p.write_text("", encoding="ascii")
+    with pytest.raises(ValueError, match="为空或不含数据行"):
+        load_truth(p)
+
+    # A whitespace-only file takes the same path (measured shape (0, 1)).
+    q = tmp_path / "blank.DAT"
+    q.write_text("\n   \n\n", encoding="ascii")
+    with pytest.raises(ValueError, match="为空或不含数据行"):
+        load_truth(q)
+
+
 def test_real_dat_has_55_rows(dataset_b_dir):
     from src.dataio.fits_loader import FrameSequence
 
@@ -211,12 +231,16 @@ def test_match_frames_respects_tolerance_synthetic():
 
 
 def test_compare_rejects_duplicate_frames():
-    """Ruling 344：两行真值撞到同一帧时必须报错，不得静默给出三个互不自洽的数。
+    """Ruling 344：两行真值撞到同一帧时必须报错，不得静默给出偏置的比例尺。
 
-    ``good = pixel > 1e-6`` protects ``plate_scale_arcsec_px`` only; the other
-    two means keep the zero step, so the report would ship
-    ``plate_scale != angular_step / pixel_step`` (measured 33% apart) with
-    ``available=True`` and no note.
+    The harm is *not* the "three numbers disagree" one Ruling 344 first recorded.
+    Since Ruling 348 put the ``good`` mask on all three means, the zero pixel
+    step a duplicate frame produces is dropped from all of them together, and
+    ``plate_scale`` measurably agrees with ``angular_step / pixel_step`` again
+    (measured 0.0% apart on this very fixture, versus 33% pre-fix). The reason to
+    refuse is the underlying one: duplicate frames mean the truth clock is offset
+    from the frame clock, so the angular and pixel displacements of a step no
+    longer span the same time interval and the scale is silently biased.
     """
     seq = StubSequence(6, cadence_s=1.0)
     truth = truth_at_offsets([0.0, 0.1, 1.0, 2.0])  # rows 0 and 1 both snap to frame 0
@@ -227,6 +251,184 @@ def test_compare_rejects_duplicate_frames():
 
     with pytest.raises(ValueError, match="重复"):
         compare(track, truth, seq, None)
+
+
+def test_compare_masks_all_three_means_consistently():
+    """Ruling 348：一个零像素步长必须从三个均值里一起剔除，否则三数字互不自洽。
+
+    Distinct frames [0,1,2,3] on purpose — Ruling 344's duplicate-frame guard
+    must *not* fire, because this is the path it cannot cover. The target sits
+    still between f0 and f1, so the pixel steps are ``[0.0, 100.0, 100.0]``.
+
+    Both expected values are analytic, not observed:
+
+    * ``pixel_step_px == 100.0`` exactly — the two non-degenerate steps of the
+      fixture's own ``xy_sky`` are 100 px each, by construction.
+    * self-consistency ``plate_scale == angular_step / pixel_step`` holds by
+      construction once the three statistics share one mask; the only residual
+      is "mean of ratios vs ratio of means", which is 0 here because every
+      surviving pixel step is identical.
+
+    Teeth: mutating ``good = pixel > 1e-6`` to ``> -1.0`` keeps the zero step, so
+    ``pixel_step_px`` becomes 66.6667 and ``plate_scale`` becomes ``inf``
+    (measured).
+    """
+    seq = StubSequence(6, cadence_s=1.0)
+    truth = truth_at_offsets([0.0, 1.0, 2.0, 3.0])
+    track = StubTrack(
+        frames=[0, 1, 2, 3],
+        xy_sky=[[0.0, 0.0], [0.0, 0.0], [100.0, 0.0], [200.0, 0.0]],
+        flux=[1000.0, 1100.0, 1200.0, 1300.0],
+    )
+
+    frames, _ = match_frames(truth, seq, track.frames)
+    assert len(set(frames.tolist())) == len(frames), "fixture must have distinct frames"
+
+    rep = compare(track, truth, seq)
+    assert rep.available is True
+    assert rep.pixel_step_px == pytest.approx(100.0, rel=1e-12)
+    assert rep.plate_scale_arcsec_px == pytest.approx(
+        rep.angular_step_arcsec / rep.pixel_step_px, rel=1e-3
+    )
+
+
+def test_compare_refuses_a_fully_stationary_target():
+    """Ruling 346/348：像素步长全为零时不得报 nan，必须 available=False。
+
+    ``np.mean([])`` is nan (measured, with ``RuntimeWarning: Mean of empty
+    slice``), and nan renders as a bare ``NaN`` token that is not valid JSON —
+    so the pre-fix code shipped a corrupt deliverable with ``available=True``.
+    """
+    seq = StubSequence(6, cadence_s=1.0)
+    truth = truth_at_offsets([0.0, 1.0, 2.0, 3.0])
+    track = StubTrack(frames=[0, 1, 2, 3], xy_sky=[[5.0, 5.0]] * 4, flux=[1000.0] * 4)
+
+    rep = compare(track, truth, seq)
+    assert rep.available is False
+    assert rep.n_matched == 4
+    assert rep.plate_scale_arcsec_px is None
+    assert "像素步长全为零" in rep.note
+
+
+@pytest.mark.parametrize(
+    "offsets_s, want_available, want_n_matched",
+    [
+        ([0.0], False, 0),
+        ([0.0, 1.0], False, 0),
+        ([0.0, 1.0, 2.0], True, 3),
+    ],
+)
+def test_compare_needs_at_least_three_matched_points(
+    offsets_s, want_available, want_n_matched
+):
+    """Ruling 348：`len(frames) < 3` 的边界精确在 3，两侧都测。
+
+    Without this the mutation ``if len(frames) < 3:`` -> ``if False:`` survives:
+    every other ``compare`` test matches >= 4 rows or is stopped earlier by the
+    duplicate-frame guard.
+
+    Note the mutant's measured behaviour changed with Ruling 348's mask fix, so
+    the two rejecting tiers fail for *different* reasons and both are needed.
+    Pre-fix the mutant returned ``plate_scale = nan`` with ``available=True`` at
+    1 matched point; now the stationary-target guard catches that tier first
+    (1 point means 0 pixel steps, so ``good.any()`` is False) and reports
+    ``n_matched=1``, which is why ``want_n_matched == 0`` is asserted rather than
+    only ``available``. The 2-point tier is the one that still reaches the
+    arithmetic: a single non-degenerate step gets through and the mutant ships
+    ``available=True`` with a plate scale derived from that one step (measured
+    5.035849 on this fixture).
+
+    ``want_n_matched == 0`` on the rejecting tiers pins that the *minimum-points*
+    early return is the one that fired — it leaves ``n_matched`` at its dataclass
+    default, whereas the stationary-target return reports the real count.
+    """
+    seq = StubSequence(6, cadence_s=1.0)
+    rep = compare(straight_track(), truth_at_offsets(offsets_s), seq)
+
+    assert rep.available is want_available
+    assert rep.n_matched == want_n_matched
+    if want_available:
+        assert np.isfinite(rep.plate_scale_arcsec_px)
+    else:
+        assert rep.plate_scale_arcsec_px is None
+        assert "不足以定量比对" in rep.note
+
+
+def test_angular_step_places_cos_factor_on_ra():
+    """Ruling 347：cos(dec) 属于赤经差。dec 恒为 60 时纯合成地区分对错。
+
+    180.0 是**解析值**：0.1 deg/step of pure RA motion at dec == 60 gives
+    ``0.1 * cos(60 deg) * 3600 = 180.000000`` arcsec/step, and ``ddec == 0`` so
+    the hypot is that alone. It is derived, not back-filled from an observation.
+
+    On dataset B this physical error is invisible: dec spans 12.526-21.527, so
+    cos(dec) in [0.9302, 0.9762] and the baseline test survives the mutation with
+    0.000443 of margin left. Here the mutation ``hypot(dra, ddec*cos(dec))``
+    yields 360.0 (dec is constant, so its cos factor multiplies a zero and the
+    un-compressed RA difference is reported in full) — a factor of 2 off.
+    """
+    seq = StubSequence(6, cadence_s=1.0)
+    truth = TruthTable(
+        path=Path("synthetic.DAT"),
+        time=Time(STUB_T0, scale="utc") + TimeDelta(np.arange(4.0), format="sec"),
+        ra_deg=209.0 - np.arange(4, dtype=np.float64) * 0.1,
+        dec_deg=np.full(4, 60.0),
+        mag=np.array([8.0, 8.2, 8.4, 8.6]),
+    )
+
+    rep = compare(straight_track(), truth, seq)
+    assert rep.angular_step_arcsec == pytest.approx(180.0, rel=1e-3)
+
+
+def test_compare_reports_none_correlation_when_variance_is_zero(tmp_path):
+    """Ruling 346：星等或 flux 恒定时相关系数无定义，报 None 而不是 nan。
+
+    ``truth_at_offsets`` defaults to mag == 8.0 for every row, so this shape is
+    one line away from the tests that already exist. ``np.corrcoef`` divides by a
+    zero standard deviation and returns nan (measured); nan then renders as a
+    bare ``NaN`` token in the written report. ``zero_point`` and its scatter need
+    no variance and stay finite.
+    """
+    seq = StubSequence(6, cadence_s=1.0)
+    truth = truth_at_offsets([0.0, 1.0, 2.0, 3.0])  # mag constant 8.0
+    rep = compare(straight_track(), truth, seq)
+
+    assert rep.mag_correlation is None
+    assert np.isfinite(rep.zero_point)
+    assert np.isfinite(rep.zero_point_std)
+    # allow_nan=False on the bytes that write_report actually writes.
+    path = write_report(rep, tmp_path)
+    data = json.loads(path.read_text(encoding="utf-8"))
+    assert data["mag_correlation"] is None
+    assert "NaN" not in path.read_text(encoding="utf-8")
+
+    # Constant flux is the mirror case: the truth magnitudes vary, the
+    # instrumental ones do not.
+    varying = truth_at_offsets([0.0, 1.0, 2.0, 3.0], mags=[8.0, 8.2, 8.4, 8.6])
+    rep2 = compare(straight_track(), varying, seq)  # straight_track flux is constant
+    assert rep2.mag_correlation is None
+    assert np.isfinite(rep2.zero_point)
+
+
+def test_write_report_refuses_to_write_non_json_nan(tmp_path):
+    """Ruling 346：`nan` 渲染成裸 `NaN` token 不是合法 JSON，必须响亮抛错。
+
+    ``json.dumps`` defaults to ``allow_nan=True``; ``jq`` / ``JSON.parse`` / Go's
+    ``encoding/json`` all reject the result, while Python's own ``json.loads``
+    accepts it — which is exactly why ``test_write_report_creates_json`` could
+    not catch this. This test pins the loud-failure behaviour itself, on the
+    dataclass directly, so it survives any future change to ``compare``'s guards.
+    """
+    rep = TruthReport(
+        dataset_id="demo",
+        available=True,
+        n_matched=10,
+        plate_scale_arcsec_px=float("nan"),
+        note="人造的 nan",
+    )
+    with pytest.raises(ValueError):
+        write_report(rep, tmp_path)
+    assert not (tmp_path / "truth_report.json").exists(), "抛错时不得留下损坏的文件"
 
 
 def test_compare_without_magnitudes_degrades_to_geometry_only():

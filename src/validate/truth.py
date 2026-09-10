@@ -50,7 +50,16 @@ class TruthTable:
 
 def load_truth(path: str | Path) -> TruthTable:
     path = Path(path)
-    raw = np.loadtxt(path, ndmin=2)
+    # encoding="utf-8" is not cosmetic: np.loadtxt otherwise decodes with the
+    # platform default, so a .DAT carrying a Chinese header comment parses in the
+    # container (UTF-8 locale) and raises UnicodeDecodeError on a GBK host
+    # (measured: "'gbk' codec can't decode byte 0xb4"). Ruling 352.
+    raw = np.loadtxt(path, ndmin=2, encoding="utf-8")
+    # An empty (or data-free) file lands on shape (0, 1), so the column guard
+    # below would report "实际 1 列" for a file that has no columns at all.
+    # Diagnose the real problem first. Ruling 352.
+    if raw.size == 0:
+        raise ValueError(f"{path.name} 为空或不含数据行")
     if raw.shape[1] != N_COLUMNS:
         raise ValueError(
             f"{path.name} 应有 {N_COLUMNS} 列（年 月 日 时 分 秒 赤经 赤纬 星等），"
@@ -140,9 +149,14 @@ class TruthReport:
 
 
 def compare(
-    track, truth: TruthTable, sequence, registration, *, max_dt_s: float = 0.5
+    track, truth: TruthTable, sequence, registration=None, *, max_dt_s: float = 0.5
 ) -> TruthReport:
     """把目标轨迹与真值定量比对，导出比例尺、星等相关性与零点。
+
+    `registration` 只为与流水线上下文的调用形状对齐而接受（Task 30 的调用点
+    `truth_mod.compare(track, truth, seq, ctx.registration)` 按位置传第四个参数），
+    **函数体从不读取它**——`track.xy_sky` 已经是配准坐标系里的坐标。默认 `None`
+    使直接调用者不必构造一个被忽略的值。见 Ruling 350。
 
     **为什么数据集 B 上 `n_matched` 是 54 而不是 55。** 真值覆盖帧 16–70（55 行），
     而目标轨迹覆盖帧 17–70（54 点）——目标在 f16 还探不到。本函数把
@@ -157,6 +171,22 @@ def compare(
     量到 776.78 的实现不要以为任务书错了。报告里引用的口径是「53 个匹配步上的
     776.91″/步」，与"全部 55 行 = 54 步"的统计量（均值 776.6289）不是同一个数。
 
+    把 cos 因子挪到赤纬差上（`hypot(Δra, Δdec·cos(dec))`）在数据集 B 上**测不出
+    来**：dec ∈ [12.526, 21.527] → cos(dec) ∈ [0.9302, 0.9762]，离 1 太近，
+    `angular_step` 只从 776.9149 挪到 770.6778，仍在 `rel=0.02` 界内，`plate_scale`
+    只用掉 99.11% 的 `abs=0.05` 预算——余量 0.000443。区分这个物理错误的是纯合成
+    单测 `test_angular_step_places_cos_factor_on_ra`（dec ≡ 60° 时两式相差 2 倍）。
+    见 Ruling 347。
+
+    **三个统计量都只在像素步长非退化的步上取均值。** `angular_step_arcsec`、
+    `pixel_step_px`、`plate_scale_arcsec_px` 共用同一个 `good = pixel > 1e-6`
+    掩码，于是三者由构造互相自洽，只剩「比值之均值 vs 均值之比」那 3.1e-6 的差。
+    若只给 `plate_scale` 加掩码，一个前半段静止的目标（帧号可以互不重复，因此
+    R344 的重复帧守卫盖不住）会让报告吐出 `plate_scale ≠ angular_step /
+    pixel_step` 的三个数字，却带着 `available=True` 和正常 note 发出去——判决方
+    一除就发现自相矛盾。见 Ruling 348。数据集 B 上这个掩码是恒等映射（实测 53/53
+    步、最小步长 123.7161 px），所以它对下面那些定稿数字逐位免费。
+
     含蓄的比例尺：`776.9149 / 125.7334 = 6.17907`（两个均值之比），而
     `plate_scale_arcsec_px` 是**逐步比值的均值**，实测 **6.179047**。两者都约
     6.179，但不是同一个统计量，别把其中一个当另一个复算。
@@ -164,24 +194,44 @@ def compare(
     `zero_point_std` 用 `diff.std()`，即 `ddof=0` 的总体标准差。实测在 54 个匹配
     点上 `ddof=0` → 0.217907、`ddof=1` → 0.219953，比 1.009390（0.94%）。想复算
     这个数的读者必须用 `ddof=0`。
+
+    **零点的两条口径（Ruling 349，引用时必须写清，否则就是错的）：**
+
+    1. `zero_point_std` 是**单点残差的样本散布**，**不是均值不确定度**。均值标准误
+       是 `σ/√n = 0.219953/√54 = 0.029932`（用 `ddof=1` 的 σ 算）。所以报告只能写
+       「零点 15.335，单点残差散布 0.218（均值标准误 0.030）」，不得写成
+       `15.335 ± 0.218` 而不说 `±` 是什么。
+    2. 零点的**光度基准是总 ADU，未作曝光归一化**：实测匹配帧的 exposure 恒为
+       0.03 s（该目录另有 0.08 s 的帧，但都在跟踪段之外），所以 15.335125 是总
+       ADU 基准；除以曝光后为 **19.142322**（`2.5·log10(0.03) = -3.807197`）。两者
+       相差 3.807，相对 0.218 是 17.5σ——拿它与任何星表零点比较前必须先说清基准。
     """
     frames, rows = match_frames(truth, sequence, track.frames, max_dt_s=max_dt_s)
 
     # 重复帧守卫：`match_frames` 逐行独立取最近帧，两行真值可以落到同一帧上。
     # 数据集 B 上不会（实测 54 / 54 互不重复），但时钟有偏置的真值文件、数据集 A
-    # 或任何后续数据集都会，而且是静默的：下面 `good = pixel > 1e-6` 只保护
-    # `plate_scale_arcsec_px`，`angular_step_arcsec` 与 `pixel_step_px` 两个均值
-    # 仍把那个零步长算进去。实测后果是三个数字不再满足
-    # `plate_scale ≈ angular_step / pixel_step`（相差 33%），却带着
-    # available=True 和空 note 发出去——判决方一除就发现自相矛盾。这三个数没有
-    # 任何可辩护的报法，所以只能抛错而不是告警。
+    # 或任何后续数据集都会。
+    #
+    # 注意危害的措辞已随 R348 的掩码修法改变。R344 记的是"三个数字互不自洽"，
+    # 那在掩码只保护 `plate_scale` 的旧实现上成立（在 R344 的 fixture 上偏
+    # 33%，同一个 fixture 换个分母就是 50%——R344 的 33% 与 R348 的 50% 是同一次
+    # 测量的两种归一化，不是两个 fixture 的性质）。三个均值共用 `good` 之后，
+    # 重复帧带来的零像素步长会被三者一起剔除，实测 `plate_scale` 与
+    # `angular_step / pixel_step` 重新逐位相等（0.0%），**旧的自洽性判据再也抓不
+    # 到重复帧**。
+    #
+    # 仍然必须抛错的理由是另一个：重复帧意味着真值时钟与帧时钟有偏置，于是每一
+    # 步的角位移与像素位移量的**不是同一段时间间隔**，比例尺被系统性地按
+    # Δt_真值 / Δt_帧 偏置，而且是静默的。这个偏置没有任何可辩护的报法，所以只
+    # 能拒收而不是告警。
     if len(set(frames.tolist())) != len(frames):
         unique, counts = np.unique(frames, return_counts=True)
         repeated = unique[counts > 1]
         raise ValueError(
             f"真值有 {len(frames) - len(unique)} 行与其他行匹配到重复帧号"
-            f"（首个重复帧 f{int(repeated[0])}），比例尺与角/像素步长将互不自洽，"
-            f"拒绝比对；请检查真值时钟与帧时钟是否存在偏置"
+            f"（首个重复帧 f{int(repeated[0])}），说明真值时钟与帧时钟存在偏置，"
+            f"角位移与像素位移量的不是同一段时间间隔，比例尺会被静默偏置，"
+            f"拒绝比对；请检查两个时钟"
         )
 
     if len(frames) < 3:
@@ -203,14 +253,35 @@ def compare(
     angular = np.hypot(dra, ddec) * 3600.0            # ″/步
     pixel = np.hypot(*np.diff(xy_sky, axis=0).T)       # px/步
     good = pixel > 1e-6
-    scale = angular[good] / pixel[good]
+    if not good.any():
+        # 目标在配准天球坐标里逐帧不动：每一步的比例尺都是 0/0。旧实现让
+        # `np.mean([])` 产出 nan 却仍报 available=True，写出的 JSON 里是裸 `NaN`
+        # token（`jq` / `JSON.parse` / Go 全部拒收）。见 Ruling 346 / 348。
+        return TruthReport(
+            dataset_id=sequence.dataset_id,
+            available=False,
+            n_matched=int(len(frames)),
+            note="目标在配准坐标系里逐帧不动（像素步长全为零），无法定标比例尺",
+        )
+    angular_good = angular[good]
+    pixel_good = pixel[good]
+    scale = angular_good / pixel_good
 
     with np.errstate(divide="ignore", invalid="ignore"):
         m_inst = -2.5 * np.log10(np.where(flux > 0, flux, np.nan))
     ok = np.isfinite(m_inst) & np.isfinite(truth.mag[rows])
     if ok.sum() >= 3:
-        corr = float(np.corrcoef(truth.mag[rows][ok], m_inst[ok])[0, 1])
-        diff = truth.mag[rows][ok] - m_inst[ok]
+        mag_ok = truth.mag[rows][ok]
+        inst_ok = m_inst[ok]
+        # 零方差守卫：真值星等恒定（数据集 A 的合成真值、或任何单星等目标）或
+        # flux 恒定时 `np.corrcoef` 除以零标准差，实测返回 nan。相关系数在这种
+        # 输入上根本没有定义，报 None 而不是把 nan 写进 JSON。零点与散布不需要
+        # 方差非零，照常计算。见 Ruling 346。
+        if mag_ok.std() == 0.0 or inst_ok.std() == 0.0:
+            corr = None
+        else:
+            corr = float(np.corrcoef(mag_ok, inst_ok)[0, 1])
+        diff = mag_ok - inst_ok
         zp, zp_std = float(diff.mean()), float(diff.std())   # ddof=0
     else:
         # 星等全缺测（真值 000 列）时降级为纯几何比对：几何仍然有效，所以
@@ -226,8 +297,8 @@ def compare(
         dt_max_s=float(dt.max()),
         plate_scale_arcsec_px=float(np.mean(scale)),
         plate_scale_std=float(np.std(scale)),
-        angular_step_arcsec=float(np.mean(angular)),
-        pixel_step_px=float(np.mean(pixel)),
+        angular_step_arcsec=float(np.mean(angular_good)),
+        pixel_step_px=float(np.mean(pixel_good)),
         mag_correlation=corr,
         zero_point=zp,
         zero_point_std=zp_std,
@@ -239,7 +310,10 @@ def write_report(report: TruthReport, output_dir: str | Path) -> Path:
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     path = output_dir / "truth_report.json"
-    path.write_text(
-        json.dumps(report.to_dict(), indent=2, ensure_ascii=False), encoding="utf-8"
-    )
+    # allow_nan=False 是刻意的：默认 True 会把 nan 渲染成裸 `NaN` token，那不是
+    # JSON（`jq` / `JSON.parse` / Go `encoding/json` 全部拒收，只有 Python 自己的
+    # json.loads 接受它）。真值报告是判决方唯一的定量交付物，宁可在这里响亮抛
+    # ValueError，也不要静默写出一个读不了的文件。见 Ruling 346。
+    payload = json.dumps(report.to_dict(), indent=2, ensure_ascii=False, allow_nan=False)
+    path.write_text(payload, encoding="utf-8")
     return path
