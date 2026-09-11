@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import numpy as np
 
+from src.pointset import as_xy
+
 DEFAULT_CENTER = (2047.5, 2047.5)
 
 
@@ -38,7 +40,7 @@ def similarity_matrix(
 
 
 def apply_transform(matrix: np.ndarray, xy: np.ndarray) -> np.ndarray:
-    xy = np.asarray(xy, dtype=np.float64).reshape(-1, 2)
+    xy = as_xy(xy, name="xy")
     if xy.size == 0:
         return np.zeros((0, 2), dtype=np.float64)
     matrix = np.asarray(matrix, dtype=np.float64)
@@ -55,8 +57,8 @@ def fit_similarity(src: np.ndarray, dst: np.ndarray) -> np.ndarray:
     本函数，真正的防护在那一层；逐对做秩检验只会在流水线第二耗时的循环里白花
     运行时间去防一个下游不会发生的场景。
     """
-    src = np.asarray(src, dtype=np.float64).reshape(-1, 2)
-    dst = np.asarray(dst, dtype=np.float64).reshape(-1, 2)
+    src = as_xy(src, name="src")
+    dst = as_xy(dst, name="dst")
     if len(src) != len(dst):
         raise ValueError(f"点数不一致: {len(src)} vs {len(dst)}")
     n = len(src)
@@ -105,7 +107,7 @@ def decompose(matrix: np.ndarray) -> dict:
 
 
 def residuals(matrix: np.ndarray, src: np.ndarray, dst: np.ndarray) -> np.ndarray:
-    diff = apply_transform(matrix, src) - np.asarray(dst, dtype=np.float64).reshape(-1, 2)
+    diff = apply_transform(matrix, src) - as_xy(dst, name="dst")
     return np.hypot(diff[:, 0], diff[:, 1])
 
 

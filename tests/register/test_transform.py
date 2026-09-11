@@ -306,9 +306,16 @@ def test_apply_transform_reshapes_flat_array_of_valid_size():
 
 
 def test_apply_transform_rejects_flat_array_of_invalid_size():
-    """长度不是偶数时 reshape 报错，消息逐字匹配（Ruling 40）。"""
+    """长度不是偶数时抛中文 ``ValueError``（Ruling 40 的性质，消息已换）。
+
+    Ruling 40 钉的性质是「奇数长度的扁平输入必须抛错」，它没有变。变的是消息
+    来源：原先是 numpy 的 ``cannot reshape array of size 3 into shape (2)``，
+    现在点集校验集中到 ``src.pointset.as_xy``，消息带上了实参名与形状。
+    逐字匹配 numpy 的内部措辞本来就把测试绑在了 numpy 的版本上，
+    换成本项目自己的消息反而更稳。
+    """
     M = similarity_matrix()
-    with pytest.raises(ValueError, match=r"cannot reshape array of size 3 into shape \(2\)"):
+    with pytest.raises(ValueError, match=r"xy 形状非法: \(3,\)"):
         apply_transform(M, np.array([1.0, 2.0, 3.0]))
 
 

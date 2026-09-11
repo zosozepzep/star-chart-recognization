@@ -23,6 +23,7 @@ import numpy as np
 from scipy.spatial import cKDTree
 
 from src.detect.segmentation import SourceTable
+from src.pointset import as_xy
 from src.register.transform import (
     DEFAULT_CENTER,
     apply_transform,
@@ -84,8 +85,8 @@ def vote_correspondences(
     这正是保留整条 61 步扫描的理由：0.026 s/对的代价换来的是对这类边界情形的
     保险，而不是对当前这条生产链路的必要条件。
     """
-    src_xy = np.asarray(src_xy, dtype=np.float64).reshape(-1, 2)
-    dst_xy = np.asarray(dst_xy, dtype=np.float64).reshape(-1, 2)
+    src_xy = as_xy(src_xy, name="src_xy")
+    dst_xy = as_xy(dst_xy, name="dst_xy")
     if len(src_xy) < 3 or len(dst_xy) < 3:
         return np.zeros((0, 2)), np.zeros((0, 2)), 0
 

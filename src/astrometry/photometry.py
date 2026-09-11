@@ -27,12 +27,50 @@
 """
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 
 import numpy as np
 
-# 默认值副本；权威取值在 src/config/default.yaml 的 photometry.min_zp_points。
+from src.config import load_config
+
+logger = logging.getLogger(__name__)
+
+# 两个常量是**回退默认值**，权威取值在 src/config/default.yaml 的 photometry 段。
+# 「回退」的含义是精确的：只有配置里缺这个键时才用到它们（``_photometry_cfg`` 的
+# ``.get``）。键存在时模块读的是配置——``test_min_zp_points_override_changes_behaviour``
+# 与 ``test_max_clip_rounds_override_changes_behaviour`` 用改过的配置证实了这一点。
+#
+# 原先这两个数**只是**模块常量，靠一条「配置值 == 模块常量」的测试维持同步，而模块
+# 从不读配置。那条测试的牙齿只到「两处数字相等」为止：把 default.yaml 的值改成 9
+# 并同步改常量，它照样绿，而调用方以为自己调了配置、实际什么也没变。
 MIN_ZP_POINTS = 3
+MAX_CLIP_ROUNDS = 5
+
+_CFG_CACHE: dict | None = None
+
+
+def _photometry_cfg() -> dict:
+    """``photometry`` 段，取自 ``src/config/default.yaml``，缓存一次。
+
+    读取时机与失败行为照 ``src.analysis.sensor_health._sensor_cfg`` 的既有做法：
+    **首次用到时懒加载并缓存**，不在 import 期读（import 期读会让任何 import 本模块
+    的动作都依赖配置文件存在，测试收集阶段就会炸）。缺键时回退到模块常量而不抛错，
+    因为一个残缺的配置不该让整条测光链无法运行——回退值与出厂值相同，
+    行为因此与配置完整时一致。
+    """
+    global _CFG_CACHE
+    if _CFG_CACHE is None:
+        _CFG_CACHE = dict(load_config()["photometry"])
+    return _CFG_CACHE
+
+
+def _min_zp_points() -> int:
+    return int(_photometry_cfg().get("min_zp_points", MIN_ZP_POINTS))
+
+
+def _max_clip_rounds() -> int:
+    return int(_photometry_cfg().get("max_clip_rounds", MAX_CLIP_ROUNDS))
 
 
 def _validate_exposure(exposure_s: float | None) -> float | None:
@@ -117,12 +155,27 @@ def zero_point_from_truth(
     """用真值星等序列拟合零点，返回 ``ZeroPoint``。
 
     零点取 ``truth_mag - instrumental_mag(flux)`` 的均值，先剔除非有限配对，再做
-    最多 5 轮 3σ 剪裁。剪裁基于 ``np.std`` 而非 MAD：实测在带真实散度的算例
-    （40 点、σ=0.218、一个 +5 mag 错配）上两者结果**逐位一致**，不必换。
+    最多 ``photometry.max_clip_rounds`` 轮 3σ 剪裁。剪裁基于 ``np.std`` 而非 MAD：实测在带真实
+    散度的算例（40 点、σ=0.218、一个 +5 mag 错配）上两者结果**逐位一致**，不必换。
 
-    有效配对少于 ``MIN_ZP_POINTS`` 时抛 ``ValueError``。注意剪裁循环的进入条件是
-    ``len(d) > MIN_ZP_POINTS``（严格大于），所以恰好等于下限的输入只走未剪裁路径。
+    有效配对少于 ``photometry.min_zp_points`` 时抛 ``ValueError``。注意剪裁循环的进入条件是
+    ``len(d) > min_zp_points``（严格大于），所以恰好等于下限的输入只走未剪裁路径。
+
+    **两个阈值都从配置读**（``_photometry_cfg``，懒加载并缓存），模块常量只是缺键
+    时的回退值。这一点是可验证的而不是约定：把 ``min_zp_points`` 调到 5 后
+    4 个有效配对实测抛错，而模块常量仍是 3。
+
+    **轮数上限咬住时会记一条 WARNING**（终审第 2 项）。上限原先是硬编码的 5、
+    且耗尽后直接落到 ``return``，没有任何痕迹。本项目算例用不到它：
+    干净 12 点 1 轮（``sd == 0`` 即停）、带真实散度 12 点 1 轮、
+    40 点含一个 +5 mag 错配 2 轮。但 5 轮**是可以被咬住的**，
+    构造输入实测：40 个 0 加 10 个等差离群点要 6 轮，
+    30 点几何尾 ``3**k`` 要 24 轮，后者 5 轮时剩 25 点、均值 1.694577e+10，
+    放开上限后剩 7 点、均值 156.142857——**差 1.69e10 mag 而无警告**。
+    这不是本项目会遇到的输入，所以上限不必提高；要紧的是它不再静默。
     """
+    min_points = _min_zp_points()
+    max_rounds = _max_clip_rounds()
     m_inst = instrumental_mag(flux, exposure_s=exposure_s)
     truth_mag = np.asarray(truth_mag, dtype=np.float64).ravel()
     if len(truth_mag) != len(m_inst):
@@ -130,21 +183,34 @@ def zero_point_from_truth(
 
     diff = truth_mag - m_inst
     ok = np.isfinite(diff)
-    if ok.sum() < MIN_ZP_POINTS:
-        raise ValueError(f"零点定标至少需要 {MIN_ZP_POINTS} 个有效配对，实际 {int(ok.sum())}")
+    if ok.sum() < min_points:
+        raise ValueError(f"零点定标至少需要 {min_points} 个有效配对，实际 {int(ok.sum())}")
 
     d = diff[ok]
-    if sigma_clip and len(d) > MIN_ZP_POINTS:
-        for _ in range(5):
+    if sigma_clip and len(d) > min_points:
+        converged = False
+        for _ in range(max_rounds):
             med, sd = np.median(d), np.std(d)
             if sd <= 0.0:
+                converged = True
                 break
             keep = np.abs(d - med) <= sigma_clip * sd
             if keep.all():
+                converged = True
                 break
             d = d[keep]
-            if len(d) <= MIN_ZP_POINTS:
+            if len(d) <= min_points:
+                converged = True
                 break
+        if not converged:
+            # 静默耗尽上限就是「剪裁没做完但结果照发」，量级不可预估，必须留痕。
+            logger.warning(
+                "sigma clipping hit the %d-round cap without converging; "
+                "%d of %d pairs kept, zero point may still be biased",
+                max_rounds,
+                len(d),
+                int(ok.sum()),
+            )
 
     return ZeroPoint(
         value=float(np.mean(d)),

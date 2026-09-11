@@ -24,6 +24,7 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from src.astrometry.photometry import ZeroPoint, instrumental_mag
+from src.pointset import as_xy
 
 
 def angular_rates(xy, times, scale_arcsec_px: float) -> np.ndarray:
@@ -67,7 +68,7 @@ def angular_rates(xy, times, scale_arcsec_px: float) -> np.ndarray:
     ``Trajectory`` 的统计量取的是 ``rate[1:]`` 这 n-1 个独立步速率，不含它。
     退化输入：``n=0`` 给空数组，``n=1`` 给 ``[nan]``，全零时标给全 ``nan``。
     """
-    xy = np.asarray(xy, dtype=np.float64).reshape(-1, 2)
+    xy = as_xy(xy, name="xy")
     times = np.asarray(times, dtype=np.float64).ravel()
     n = len(xy)
     if len(times) != n:
@@ -310,8 +311,8 @@ def build_trajectory(
     unix_s = picked.unix
     isot = picked.isot
 
-    xy_sky = np.asarray(track.xy_sky, dtype=np.float64).reshape(-1, 2)
-    xy_det = np.asarray(track.xy_det, dtype=np.float64).reshape(-1, 2)
+    xy_sky = as_xy(track.xy_sky, name="track.xy_sky")
+    xy_det = as_xy(track.xy_det, name="track.xy_det")
     flux = np.asarray(track.flux, dtype=np.float64).ravel()
     rates = angular_rates(xy_sky, rel_s, scale_arcsec_px)
 

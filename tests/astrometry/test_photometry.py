@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import json
+import logging
 import warnings
 
 import numpy as np
 import pytest
 
 from src.astrometry.photometry import (
+    MAX_CLIP_ROUNDS,
     MIN_ZP_POINTS,
     PhotometryReport,
     ZeroPoint,
@@ -15,6 +17,7 @@ from src.astrometry.photometry import (
     limiting_magnitude,
     zero_point_from_truth,
 )
+from src.config import load_config
 from src.detect.segmentation import SourceTable
 
 
@@ -179,16 +182,157 @@ def test_zero_point_requires_enough_points():
         zero_point_from_truth([1000.0], [8.0])
 
 
-def test_min_zp_points_comes_from_default_yaml():
-    """阈值必须落在 ``default.yaml``，模块常量只作为默认值副本。
+@pytest.fixture
+def photometry_cfg_override(monkeypatch):
+    """临时替换 ``photometry`` 配置段并清掉模块缓存，退出时恢复。
 
-    全局约束要求阈值进配置文件而不是写在模块体里。此处断言配置键存在且与模块
-    默认值相等，两处一旦不同步就红。
+    ``_CFG_CACHE`` 必须两头都清：进入时清是为了让替换生效（前面的测试可能已经填过
+    缓存），退出时清是为了不把改过的段留给后面的测试——一个模块级缓存被污染后，
+    失败会出现在与本测试无关的地方。
     """
-    from src.config import load_config
+    import src.astrometry.photometry as mod
 
+    def _apply(**keys):
+        monkeypatch.setattr(mod, "_CFG_CACHE", None, raising=False)
+        base = dict(load_config()["photometry"])
+        base.update(keys)
+        monkeypatch.setattr(mod, "_CFG_CACHE", base, raising=False)
+        return base
+
+    yield _apply
+    mod._CFG_CACHE = None
+
+
+def test_min_zp_points_comes_from_default_yaml():
+    """配置键必须存在，且与模块的回退默认值一致。
+
+    这条只钉「两处数字相等」，牙齿到此为止——它**不能**证明模块真的读了配置
+    （把配置值和常量一起改成 9，它照样绿）。真读配置由
+    ``test_min_zp_points_override_changes_behaviour`` 钉住，两条不可互相替代。
+    """
     conf = load_config()
     assert conf["photometry"]["min_zp_points"] == MIN_ZP_POINTS
+
+
+def test_max_clip_rounds_comes_from_default_yaml():
+    """剪裁轮数上限同样必须落在配置里，模块常量只是回退值。
+
+    原先这个 5 是**裸写在循环里**的字面量（``for _ in range(5)``），既不在配置里
+    也没有名字。同上条：这只钉数字相等，真读配置见下面那条覆盖测试。
+    """
+    conf = load_config()
+    assert conf["photometry"]["max_clip_rounds"] == MAX_CLIP_ROUNDS
+
+
+def test_min_zp_points_override_changes_behaviour(photometry_cfg_override):
+    """把配置里的 ``min_zp_points`` 调到 5，4 个有效配对必须被拒。
+
+    被保护的性质：**阈值改在配置里就要真的生效**。原先模块只有常量、从不读配置，
+    靠上面那条「相等」断言维持同步——而那条测试对「模块不读配置」这个事实**零区分
+    力**：调用方改了 ``default.yaml`` 以为调紧了门限，实测行为一点没变。
+
+    断言分两半：调到 5 时 4 个配对被拒（消息里的数字必须是 **5** 而不是模块常量 3，
+    否则消息在说谎），调回 3 时同一份输入通过。少了后一半，一个「永远抛错」的实现
+    也能让前一半变绿。模块常量本身不动（仍是 3），这条同时证明拒绝的依据是配置。
+    """
+    flux = np.full(4, 1000.0)
+    truth = instrumental_mag(flux) + 15.0
+
+    photometry_cfg_override(min_zp_points=5)
+    with pytest.raises(ValueError, match="至少需要 5 个有效配对，实际 4"):
+        zero_point_from_truth(flux, truth)
+    assert MIN_ZP_POINTS == 3  # 模块常量未被改动，拒绝的依据只能是配置
+
+    photometry_cfg_override(min_zp_points=3)
+    assert zero_point_from_truth(flux, truth).n_points == 4
+
+
+def test_max_clip_rounds_override_changes_behaviour(photometry_cfg_override):
+    """把配置里的 ``max_clip_rounds`` 放开到 40，几何尾算例的结果必须跟着变。
+
+    被保护的性质同上条。用 30 点几何尾 ``3**k``，因为它是实测能咬住 5 轮上限的
+    输入：5 轮时剩 **25** 点、均值 **1.694577e+10**；放开到 40 轮时走完 **24** 轮
+    收敛、剩 **7** 点、均值 **156.142857**。两个结果相差 1.69e10 mag，所以「配置
+    有没有生效」在这个算例上一望可辨，不需要任何容差判断。
+
+    警告那一半同时反向验证：上限咬住时有 WARNING，放开后收敛则**没有**。
+    """
+    geometric = np.array([3.0 ** k for k in range(30)])
+    flux = np.full(len(geometric), 1000.0)
+    truth = instrumental_mag(flux) + geometric
+
+    photometry_cfg_override(max_clip_rounds=5)
+    capped = zero_point_from_truth(flux, truth, sigma_clip=3.0)
+    assert capped.n_points == 25
+    assert capped.value == pytest.approx(1.694577e10, rel=1e-6)
+
+    photometry_cfg_override(max_clip_rounds=40)
+    freed = zero_point_from_truth(flux, truth, sigma_clip=3.0)
+    assert freed.n_points == 7
+    assert freed.value == pytest.approx(156.142857, abs=1e-6)
+    assert MAX_CLIP_ROUNDS == 5  # 模块常量未动，轮数只能来自配置
+
+
+def test_photometry_falls_back_to_module_constants_when_keys_are_missing():
+    """配置段缺键时回退到模块常量，而不是抛 ``KeyError``。
+
+    一个残缺的配置不该让整条测光链无法运行。回退值与出厂值相同，所以行为与配置
+    完整时**逐位一致**——这正是断言的内容：空配置段下 4 个配对通过（回退门限 3），
+    2 个配对被拒且消息报的是 3。
+
+    这里直接写 ``_CFG_CACHE`` 而不用上面那个 fixture：本条要的恰是「段里什么都没
+    有」，而 fixture 是在完整段上叠加键。``finally`` 里清回 ``None``，否则空段会
+    留给后面的测试。
+    """
+    import src.astrometry.photometry as mod
+
+    mod._CFG_CACHE = {}
+    try:
+        flux = np.full(4, 1000.0)
+        truth = instrumental_mag(flux) + 15.0
+        assert zero_point_from_truth(flux, truth).n_points == 4
+        with pytest.raises(ValueError, match="至少需要 3 个有效配对，实际 2"):
+            zero_point_from_truth(np.full(2, 1000.0), np.full(2, 8.0))
+    finally:
+        mod._CFG_CACHE = None
+
+
+def test_clip_round_cap_logs_a_warning_when_it_bites(caplog):
+    """轮数上限咬住时必须留一条 WARNING，不得静默发出未剪完的零点。
+
+    被保护的性质：**剪裁没做完而结果照发，量级不可预估，必须留痕**。上限原先
+    耗尽后直接落到 ``return``，没有任何痕迹。
+
+    构造 30 点几何尾 ``3**k``：实测 5 轮时剩 **25** 点、均值 **1.694577e+10**，
+    放开上限要 **24** 轮、剩 **7** 点、均值 **156.142857**——**差 1.69e10 mag 而
+    原先无警告**。这不是本项目会遇到的输入（真实算例 1 轮即收敛），所以上限不必
+    提高；要紧的是它不再静默。
+
+    第二组断言（干净 12 点、1 轮收敛、**零条** WARNING）是本条的另一半牙齿：
+    少了它，一个「每次都记 WARNING」的实现也能让上一半变绿，而那会把日志淹掉。
+    """
+    geometric = np.array([3.0 ** k for k in range(30)])
+    flux = np.full(len(geometric), 1000.0)
+    truth = instrumental_mag(flux) + geometric
+
+    with caplog.at_level(logging.WARNING, logger="src.astrometry.photometry"):
+        zp = zero_point_from_truth(flux, truth, sigma_clip=3.0)
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    message = warnings[0].getMessage()
+    assert "without converging" in message
+    # 消息必须报出剪到剩几点，否则读者无从判断这个零点偏了多少。
+    assert "25 of 30" in message
+    # 钉住「上限确实咬住了」这个前提：咬住时存活点数就是 25。
+    assert zp.n_points == 25
+
+    caplog.clear()
+    clean = np.full(12, 1000.0)
+    with caplog.at_level(logging.WARNING, logger="src.astrometry.photometry"):
+        zp_clean = zero_point_from_truth(clean, instrumental_mag(clean) + 15.0)
+    assert [r for r in caplog.records if r.levelno == logging.WARNING] == []
+    assert zp_clean.n_points == 12
+    assert zp_clean.value == pytest.approx(15.0, abs=1e-9)
 
 
 def test_zero_point_ignores_nan_truth():

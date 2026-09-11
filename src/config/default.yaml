@@ -59,6 +59,7 @@ stack:
 photometry:
   zero_point_source: truth  # truth | catalog | none
   min_zp_points: 3          # 零点拟合所需最少有效配对数。同时是 3σ 剪裁循环的进入门限（严格大于才进），所以恰好等于本值的输入只走未剪裁路径；提高本值必须同步 src/astrometry/photometry.py 的 MIN_ZP_POINTS
+  max_clip_rounds: 5        # 3σ 剪裁的轮数上限。本项目算例 1 轮即收敛（干净点 sd==0 即停），上限从不咬住；咬住时会记 WARNING 而非静默。提高本值必须同步 src/astrometry/photometry.py 的 MAX_CLIP_ROUNDS
 
 repeatability:
   sigmas: [2.0, 2.5, 3.0, 3.5, 4.0, 4.5, 5.0, 6.0, 8.0]

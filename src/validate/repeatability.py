@@ -63,6 +63,7 @@ from scipy.spatial import cKDTree
 
 from src.calib.background import model_background
 from src.detect.segmentation import detect_sources_in_frame
+from src.pointset import as_xy
 
 logger = logging.getLogger(__name__)
 
@@ -135,25 +136,61 @@ class RepeatabilityCurve:
         防的是那条早返回被改成按定义算 ``0/0``，或从 ``to_dict()`` 反序列化重建
         曲线时 nan 从外部流进来（裁决 377）。
 
-        **已知局限（裁决 377 附记，本轮只记录不修）**：``n_sigma`` 有重复值时结果
-        依赖插入顺序。实测同为 5.0σ、复现率 0.90 与 0.10、门限 0.85：插入序
-        ``(0.90, 0.10)`` 抛 ``ValueError``（且消息自称「最高为 0.900」，自相矛盾），
-        插入序 ``(0.10, 0.90)`` 返回 5.0σ。``sorted`` 是稳定排序，同键保持原序，
-        所以后缀扫描先遇到哪一个取决于调用方的构造顺序。``scan_thresholds`` 从
-        ``sigmas`` 列表逐档构造，重复 sigma 需要调用方主动传重复值，不是现实入口；
-        去重留到出图任务再看。
+        **``n_reference == 0`` 的档位被跳过，不参与后缀判据**（终审第 3 项）。
+        那种档的复现率是 ``0.0``，但那个 0 是「统计未定义」——
+        ``cross_frame_repeatability`` 对空参考帧走早返回给的占位值，
+        与「有源但全没复现」的真实 0 在数值上不可分（实测两者都返回
+        ``(0, 0.0, 0.0)``）。不跳的后果不是少一档而是**否决掉整条曲线**：
+        后缀扫描从高 sigma 往低走，而 sigma 越高探测越少、参考帧先空，
+        所以未定义档天然落在最高位、第一步就 ``break``。实测曲线
+        ``[3σ:0.90, 5σ:0.95, 7σ:未定义]`` 门限 0.85 下抛
+        「没有阈值达到复现率 0.85；最高为 0.950」——**消息自己列出的 0.950
+        就是被否决的那个合格档**。跳过后返回 3.0σ，与不含该档的曲线一致。
+
+        跳过用的是 ``n_reference``，它**本来就在** ``RepeatabilityPoint`` 里
+        （见该类字段），所以这一项不需要加字段、不是接口变更——
+        台账原先记「需给 ``RepeatabilityPoint`` 加字段或跳档」是核盘时的误记。
+
+        全部档位都未定义时抛 ``ValueError`` 并说明是未定义而非不达标，
+        不与「有档但都不达标」共用一句话。
+
+        **已知局限（裁决 377 附记）**：``n_sigma`` 有重复值时结果依赖插入顺序。
+        实测同为 5.0σ、复现率 0.90 与 0.10、门限 0.85：插入序
+        ``(0.90, 0.10)`` 抛 ``ValueError``，插入序 ``(0.10, 0.90)`` 返回 5.0σ。
+        ``sorted`` 是稳定排序，同键保持原序，所以后缀扫描先遇到哪一个取决于
+        调用方的构造顺序。``scan_thresholds`` 从 ``sigmas`` 列表逐档构造，
+        重复 sigma 需要调用方主动传重复值，不是现实入口。**终审判决：不去重**——
+        去重要选保留哪一个（取最小复现率是唯一保守的选择），
+        而那等于替调用方决定它传重复档位的意图；改而在错误消息里把
+        自相矛盾去掉（见下）。
         """
         ordered = sorted(self.points, key=lambda p: p.n_sigma)
+        # n_reference == 0 -> 该档统计未定义，不是「复现率为 0」，见 docstring。
+        usable = [p for p in ordered if p.n_reference > 0]
+        n_undefined = len(ordered) - len(usable)
+        if not usable:
+            raise ValueError(
+                f"曲线上没有统计有效的档位（共 {len(ordered)} 档，"
+                f"全部因参考帧为空而未定义），无法给出推荐阈值"
+            )
         best: RepeatabilityPoint | None = None
         # 从高 sigma 往低走，一旦遇到不达标的档就停：此前累积的即是合格后缀。
-        for point in reversed(ordered):
+        for point in reversed(usable):
             if not point.reproducibility >= min_reproducibility:
                 break
             best = point
         if best is None:
+            # 消息里的「最高」只取自 usable，且必须说清它为什么没被选中：
+            # 后缀判据要求「自身及所有更高阈值都达标」，所以一个达标的档
+            # 完全可能因为上邻居不达标而落选——原先的消息只报最高值，
+            # 读起来像「0.900 既是最高又没达到 0.85」（终审第 5 项）。
+            top = max(usable, key=lambda p: p.reproducibility)
+            extra = f"（另有 {n_undefined} 档因参考帧为空而未参与）" if n_undefined else ""
             raise ValueError(
-                f"没有阈值达到复现率 {min_reproducibility}；最高为 "
-                f"{max((p.reproducibility for p in self.points), default=float('nan')):.3f}"
+                f"没有阈值满足「自身及所有更高阈值的复现率都 >= "
+                f"{min_reproducibility}」；有效档位里最高的是 "
+                f"{top.n_sigma:.1f}σ 的 {top.reproducibility:.3f}，"
+                f"但它上方存在不达标的档{extra}"
             )
         return best
 
@@ -180,11 +217,20 @@ def expected_neighbours_per_source(
     次序在这里无影响。面积必须取自数据：同样 2284 个探测在 4096² 场里给出
     0.00385，在 2048² 场里是 0.01540（恰 4 倍）。而 4096x4136 只挪到 0.00381
     ——**面积的量级要紧，具体帧尺寸不要紧**。
+
+    守卫是**逐维**的，不是对面积的（R381、终审第 4 项）：原先写
+    ``area <= 0`` 拦不住 ``(-4096, -4096)``——两个负数相乘面积为正，
+    实测结果与 ``(4096, 4096)`` **逐位相同** 0.0038491832，
+    也就是一个明显非法的图幅静默给出看起来完全正常的数。
+    单负与含零的三种情形（``(0,4096)`` / ``(-4096,4096)`` / ``(4096,-4096)``）
+    原先能拦下，所以这个洞只在**两维同时为负**时打开。
     """
     ny, nx = int(image_shape[0]), int(image_shape[1])
+    if ny <= 0 or nx <= 0:
+        raise ValueError(
+            f"图幅每一维都必须为正: image_shape={tuple(image_shape)}"
+        )
     area = float(ny) * float(nx)
-    if area <= 0.0:
-        raise ValueError(f"图幅面积必须为正: image_shape={tuple(image_shape)}")
     if match_radius_px <= 0.0:
         raise ValueError(f"匹配半径必须为正: {match_radius_px}")
     return float(n_detections) * math.pi * match_radius_px ** 2 / area
@@ -293,7 +339,7 @@ def cross_frame_repeatability(
     if not match_radius > 0.0 or not math.isfinite(match_radius):
         raise ValueError(f"匹配半径必须为正的有限值，实际 {match_radius}")
 
-    frames = [np.asarray(p, dtype=np.float64).reshape(-1, 2) for p in sky_positions]
+    frames = [as_xy(p, name="sky_positions 的一帧") for p in sky_positions]
 
     if len(frames) < 2:
         raise ValueError("可复现性统计至少需要 2 帧")
@@ -358,8 +404,21 @@ def scan_thresholds(
     仅这两个字典就是 GB 量级；``sigmas`` 不影响驻留量（逐档循环、探测表随即释放）。
     所以 ``frames`` 不是随手可加大的参数——它同时决定驻留量与结构上限。
     具体峰值 RSS 本项目未实测，此处只给量级。
+
+    ``sigmas`` 与 ``frames`` 的空/过短检查放在**背景建模之前**（终审第 2 项）：
+    原先 ``sigmas=[]`` 会把全部帧的背景建完（实测 4096² 单帧约 1.48 s，
+    6 帧近 9 s 与 GB 级驻留）才返回一条空曲线，而空曲线的
+    ``recommended()`` 又只会抛「没有统计有效的档位」——
+    真正的原因（调用方传了空阈值表）在两层之外。
+    ``frames`` 少于 2 帧同样先拦：``cross_frame_repeatability`` 本来就要求 ≥2 帧，
+    但那要等到第一档 sigma 才抛，同样白建一遍背景。
     """
     frames = list(frames)
+    sigmas = list(sigmas)
+    if not sigmas:
+        raise ValueError("阈值表 sigmas 为空，无可扫描的档位")
+    if len(frames) < 2:
+        raise ValueError(f"可复现性扫描至少需要 2 帧，实际 {len(frames)}")
     background_kwargs = dict(background_kwargs or {})
 
     models = {}

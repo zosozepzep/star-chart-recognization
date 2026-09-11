@@ -116,7 +116,7 @@ def test_curve_recommended_picks_lowest_sigma_above_threshold():
 def test_curve_recommended_raises_when_none_qualify():
     """无一档达标时必须抛错，不得退化成「返回最好的那个」。"""
     curve = _curve([(3.0, 500.0, 20, 0.04)])
-    with pytest.raises(ValueError, match="没有阈值达到复现率"):
+    with pytest.raises(ValueError, match="没有阈值满足"):
         curve.recommended(min_reproducibility=0.85)
 
 
@@ -326,6 +326,204 @@ def test_many_to_one_matching_is_possible_and_tolerated():
     frames = [reference] + [np.array([[100.5, 100.0]]) for _ in range(5)]
     n, _, _ = cross_frame_repeatability(frames, match_radius=3.0)
     assert n == 2
+
+
+# --------------------------------------------------------------------------
+# 遗留复审 14.3：n_reference == 0 的档统计未定义，不得否决整条曲线
+# --------------------------------------------------------------------------
+
+
+def _pt(n_sigma: float, reproducibility: float, n_reference: int) -> RepeatabilityPoint:
+    """造一个字段自洽的点：``n_reproducible`` 由前两项反算，纯度取同值。
+
+    与 ``_curve`` 不同，这里的 ``n_reference`` 是**入参**而不是从 ``n_detected_mean``
+    推的——本节要钉的性质就挂在这个字段上（``n_reference == 0`` 表示该档未定义），
+    所以它必须能被逐档指定。
+    """
+    return RepeatabilityPoint(
+        n_sigma=n_sigma,
+        n_detected_mean=float(n_reference),
+        n_reproducible=int(round(reproducibility * n_reference)),
+        n_reference=n_reference,
+        reproducibility=reproducibility,
+        purity=reproducibility,
+    )
+
+
+def test_undefined_high_sigma_point_does_not_veto_the_whole_curve():
+    """最高档参考帧为空时，不得让整条曲线求不出推荐值。
+
+    被保护的性质：**统计未定义的档不参与后缀判据**。这里的危害不是「少一档」而是
+    **否决整条曲线**，机理是后缀扫描从高 σ 往低走，而 σ 越高探测越少、参考帧先空，
+    所以未定义档天然落在最高位、第一步就 ``break``。
+
+    实测跳档前，曲线 ``[3σ:0.90, 5σ:0.95, 7σ:未定义]`` 门限 0.85 下抛
+    「没有阈值达到复现率 0.85；最高为 0.950」——**消息自己列出的 0.950 就是被否决
+    的那个合格档**。跳档后返回 3.0σ。
+
+    第二个断言是本条的牙齿：与「本来就不含该档的曲线」逐位一致。少了它，
+    「跳档」和「把未定义档当作达标」在这个 fixture 上给出同一个 3.0σ。
+    """
+    with_undefined = RepeatabilityCurve(
+        points=[_pt(3.0, 0.90, 100), _pt(5.0, 0.95, 40), _pt(7.0, 0.0, 0)],
+        frames=[0, 1],
+        match_radius_px=3.0,
+    )
+    assert with_undefined.recommended(min_reproducibility=0.85).n_sigma == 3.0
+
+    without = RepeatabilityCurve(
+        points=[_pt(3.0, 0.90, 100), _pt(5.0, 0.95, 40)],
+        frames=[0, 1],
+        match_radius_px=3.0,
+    )
+    assert (
+        with_undefined.recommended(min_reproducibility=0.85).n_sigma
+        == without.recommended(min_reproducibility=0.85).n_sigma
+    )
+
+
+def test_undefined_point_is_not_read_as_a_zero_reproducibility_point():
+    """未定义档与「有源但全没复现」必须被区别对待，尽管两者的复现率都是 0.0。
+
+    ``cross_frame_repeatability`` 对空参考帧走早返回、给的是占位的 ``(0, 0.0, 0.0)``，
+    实测与「判据合法而一个源都没复现」返回的**完全同形**。数值上不可分，所以只能
+    靠 ``n_reference`` 区分——这也是为什么跳档判据用它而不是用复现率。
+
+    两条曲线唯一的差别是 ``n_reference``（0 对 100）：未定义那条给出 3.0σ，
+    真实为零那条必须抛错。
+    """
+    undefined_top = RepeatabilityCurve(
+        points=[_pt(3.0, 0.90, 100), _pt(5.0, 0.0, 0)], frames=[0, 1], match_radius_px=3.0
+    )
+    assert undefined_top.recommended(min_reproducibility=0.85).n_sigma == 3.0
+
+    genuinely_zero_top = RepeatabilityCurve(
+        points=[_pt(3.0, 0.90, 100), _pt(5.0, 0.0, 100)],
+        frames=[0, 1],
+        match_radius_px=3.0,
+    )
+    with pytest.raises(ValueError, match="没有阈值满足"):
+        genuinely_zero_top.recommended(min_reproducibility=0.85)
+
+
+def test_all_points_undefined_raises_a_distinct_message():
+    """全档未定义时的错误必须说清是**未定义**，不与「有档但都不达标」共用一句话。
+
+    两句话对调用方的含义完全不同：前者要改取帧（参考帧不得为空），后者要改门限或
+    接受更高 σ。实测消息「曲线上没有统计有效的档位（共 2 档，全部因参考帧为空而
+    未定义），无法给出推荐阈值」，且**不含**「没有阈值满足」这个前缀——
+    第二个断言就是钉这一点，否则两条消息可以是同一句而本条仍绿。
+    """
+    curve = RepeatabilityCurve(
+        points=[_pt(3.0, 0.0, 0), _pt(5.0, 0.0, 0)], frames=[0, 1], match_radius_px=3.0
+    )
+    with pytest.raises(ValueError, match="没有统计有效的档位") as exc:
+        curve.recommended(min_reproducibility=0.85)
+    assert "没有阈值满足" not in str(exc.value)
+
+
+def test_failure_message_explains_why_a_qualifying_point_lost():
+    """一个达标的档因上邻居不达标而落选时，消息必须说出这个理由。
+
+    被保护的性质：**错误消息不得自相矛盾**。原先只报「最高为 0.900」，而门限是
+    0.85——读起来像「0.900 既是最高又没达到 0.85」。后缀判据下这完全正常：0.900
+    落选是因为它上方存在不达标的档，可原消息一个字也没提。
+
+    同时钉住未定义档在消息里被单独计数（「另有 1 档因参考帧为空而未参与」），
+    否则读者会以为那一档参与了判决。
+    """
+    curve = RepeatabilityCurve(
+        points=[_pt(3.0, 0.90, 100), _pt(5.0, 0.10, 80), _pt(7.0, 0.0, 0)],
+        frames=[0, 1],
+        match_radius_px=3.0,
+    )
+    with pytest.raises(ValueError) as exc:
+        curve.recommended(min_reproducibility=0.85)
+    message = str(exc.value)
+    assert "3.0σ 的 0.900" in message
+    assert "上方存在不达标的档" in message
+    assert "另有 1 档因参考帧为空而未参与" in message
+
+
+def test_undefined_count_is_omitted_when_there_is_none():
+    """没有未定义档时，消息里不得出现那句括注——它会让读者以为有档被排除了。"""
+    curve = RepeatabilityCurve(
+        points=[_pt(3.0, 0.90, 100), _pt(5.0, 0.10, 80)], frames=[0, 1], match_radius_px=3.0
+    )
+    with pytest.raises(ValueError) as exc:
+        curve.recommended(min_reproducibility=0.85)
+    assert "参考帧为空" not in str(exc.value)
+
+
+# --------------------------------------------------------------------------
+# 遗留复审：两负图幅与 scan_thresholds 的前置守卫
+# --------------------------------------------------------------------------
+
+
+def test_both_dimensions_negative_is_caught_by_the_per_axis_guard():
+    """``(-4096, -4096)`` 必须被拒——面积守卫拦不住它，两负相乘面积为正。
+
+    被保护的性质：非法 ``image_shape`` 不得产出可流下游的数值。这一档是
+    ``area <= 0`` 那种写法**唯一漏掉**的情形，而它恰是最隐形的一档：实测
+    ``(-4096, -4096)`` 给出的 λ 与正确的 ``(4096, 4096)`` **逐位相同**
+    （两者的 ``repr`` 都是 ``0.0038491832367892136``），一个明显非法的图幅静默给出
+    看起来完全正常的数。单负与含零的三种情形面积守卫本来就能拦，
+    所以这个洞只在两维同时为负时打开。
+
+    第一个断言先证危害存在（旧算式两负与正确尺寸逐位相同），第二个才证守卫拦得住。
+    """
+    correct = 2284 * math.pi * 3.0 ** 2 / (4096.0 * 4096.0)
+    both_negative = 2284 * math.pi * 3.0 ** 2 / (-4096.0 * -4096.0)
+    assert repr(both_negative) == repr(correct)
+
+    with pytest.raises(ValueError, match="图幅每一维都必须为正"):
+        expected_neighbours_per_source(2284, 3.0, (-4096, -4096))
+    # 合法尺寸仍须放行，守卫不得把逐维判据写成「必须相等」之类更窄的条件。
+    assert expected_neighbours_per_source(2284, 3.0, (4096, 4136)) > 0.0
+
+
+@pytest.mark.parametrize(
+    "shape", [(0, 4096), (4096, 0), (-4096, 4096), (4096, -4096), (-4096, -4096)]
+)
+def test_every_illegal_shape_names_the_tuple_in_the_message(shape):
+    """五种非法图幅都抛同一条带元组的中文消息。
+
+    ``(0, 4096)`` 与 ``(4096, 0)`` 原先会抛 ``ZeroDivisionError``（实测，不是 numpy
+    的 inf + warning），性质上同样「不产出数值」，所以守卫在那两档是等价变异——
+    保留它们只为消息的诊断价值，本条断言的正是那个诊断价值。
+    """
+    with pytest.raises(ValueError, match=r"图幅每一维都必须为正: image_shape="):
+        expected_neighbours_per_source(2284, 3.0, shape)
+
+
+class _ExplodingSequence:
+    """``image()`` 一旦被调用就炸——用来证明守卫在背景建模**之前**生效。"""
+
+    def image(self, idx):  # pragma: no cover - 被调用即为失败
+        raise AssertionError(f"背景建模被触及（帧 {idx}），守卫没有前置")
+
+
+@pytest.mark.parametrize(
+    ("sigmas", "frames", "pattern"),
+    [
+        ([], [0, 1], r"阈值表 sigmas 为空"),
+        ([3.0], [0], r"至少需要 2 帧，实际 1"),
+        ([3.0], [], r"至少需要 2 帧，实际 0"),
+    ],
+)
+def test_scan_thresholds_validates_before_modelling_backgrounds(sigmas, frames, pattern):
+    """空 ``sigmas`` 与过短 ``frames`` 必须在建背景之前就抛错。
+
+    被保护的性质：**参数错误不得先付出整条流水线最贵那一步的代价**。背景建模实测
+    4096² 单帧约 1.48 s、驻留 GB 量级，6 帧近 9 s。原先 ``sigmas=[]`` 会把全部帧
+    的背景建完才返回一条空曲线，而空曲线的 ``recommended()`` 只会抛「没有统计有效
+    的档位」——真正的原因（调用方传了空阈值表）在两层之外。
+
+    ``_ExplodingSequence.image`` 被调用即断言失败，所以这条同时钉住「抛错」与
+    「抛在建模之前」两件事；只断言 ``pytest.raises`` 的话，守卫放在建模之后也是绿的。
+    """
+    with pytest.raises(ValueError, match=pattern):
+        scan_thresholds(_ExplodingSequence(), frames, None, sigmas=sigmas)
 
 
 # --------------------------------------------------------------------------
@@ -638,11 +836,13 @@ def test_nan_reproducibility_is_not_treated_as_qualifying():
     ``test_empty_reference_frame_returns_zeros`` 钉住了这一点）。本条断言防的是
     **那条早返回被改动**，或从 ``to_dict()`` 反序列化重建曲线时 nan 从外部流进来。
 
-    只断言异常类型与「没有阈值达到复现率」这个前缀，**不断言消息里的最高值**：
-    实测本 fixture 上消息是「…最高为 0.900」，因为 ``max()`` 在有 nan 时的返回值
-    取决于比较顺序，于是消息自称最高 0.900 ≥ 0.85 而又说没有阈值达标、自相矛盾。
-    这是消息措辞的既有瑕疵（与裁决 377 附记的重复 ``n_sigma`` 那条同源），
-    不是本条要钉的性质，也不该被断言锁住。
+    只断言异常类型与「没有阈值满足」这个前缀，**不断言消息里的最高值**：
+    实测本 fixture 上消息是「…有效档位里最高的是 3.0σ 的 0.900，但它上方存在
+    不达标的档」。``max()`` 在有 nan 时的返回值取决于比较顺序
+    （``nan > 0.90`` 为 ``False``，所以先遇到的 0.900 被保留），
+    这个顺序依赖不是本条要钉的性质，不该被断言锁住。消息本身现在是自洽的——
+    它明说 0.900 是因为上方有不达标的档才落选（终审第 5 项修法），
+    而不再像原先那样只报「最高为 0.900」、读起来像 0.900 既是最高又没达到 0.85。
     """
     curve = RepeatabilityCurve(
         points=[
@@ -659,7 +859,7 @@ def test_nan_reproducibility_is_not_treated_as_qualifying():
         match_radius_px=3.0,
     )
     # 最高档是 nan，它不达标 -> 后缀为空 -> 抛错。不得返回 3.0σ。
-    with pytest.raises(ValueError, match="没有阈值达到复现率"):
+    with pytest.raises(ValueError, match="没有阈值满足"):
         curve.recommended(min_reproducibility=0.85)
     # 钉住写法：正向比较放行 nan，反向比较拦住它。
     assert not math.nan < 0.85
@@ -743,7 +943,7 @@ def test_default_threshold_is_unreachable_on_the_measured_curve(dataset_a_curve)
     门限 0.85 是 ``recommended()`` 的默认值，此处无参调用，**一字未动**。
     """
     _, curve = dataset_a_curve
-    with pytest.raises(ValueError, match="没有阈值达到复现率"):
+    with pytest.raises(ValueError, match="没有阈值满足"):
         curve.recommended()
 
 
