@@ -370,3 +370,375 @@ def test_cross_dataset_cluster_census_is_stable_in_frame_budget(dataset_a_dir):
     assert len(census(5)) == 115
     assert len(census(10)) == 8
     assert len(census(15)) == 6
+
+
+# ---- 观测条件量化（派生数据集 5）----
+# 实测常量：来自 probe/t23-recheck2.py..t23-recheck4.py，勿改（R423, R427-429）
+
+SCALE_ARCSEC_PX = 6.179          # 真值定出的板比例（R426：这不是独立观测量）
+SKY_MU_MIN, SKY_MU_MAX = 15.0, 23.0
+ZP_TRUTH_B = 15.335125           # 数据集 B 真值零点，台账 :9235
+ZP_TRUTH_B_STD = 0.217907
+# 真实数据实测（第 30 帧）。R402：余量小才有判别力，不得放宽。
+FWHM_PX_B, FWHM_PX_A = 3.403649, 3.409136
+ELONG_B, ELONG_A = 1.195896, 1.202717
+SKY_MU_B, SKY_MU_A = 17.344338, 17.542291
+
+
+def _fit(sigma=1.6, ok=True, sigma_y=None):
+    from src.detect.psf import FWHM_PER_SIGMA, GaussianFit
+
+    sy = sigma if sigma_y is None else sigma_y
+    return GaussianFit(
+        x=10.0, y=10.0, amplitude=900.0,
+        sigma_x=sigma, sigma_y=sy, theta_deg=0.0, background=6.0,
+        fwhm_px=FWHM_PER_SIGMA * float(np.sqrt(sigma * sy)),
+        residual_ratio=0.05 if ok else 0.9,
+        success=ok,
+    )
+
+
+def _derive_zp(exposure_s):
+    """从同一批数据派生零点。
+
+    R427：**不要**手写 21.0546 / 17.2474 这两个四位字面量再断 ``abs=1e-6``——
+    实测那样两条路径差 3.14e-06，测试必然红。从函数派生时实测差 3.55e-15。
+    """
+    from src.astrometry.photometry import zero_point_from_truth
+
+    return zero_point_from_truth(
+        np.full(12, 5000.0), np.full(12, 8.0), exposure_s=exposure_s
+    )
+
+
+# ---- estimate_seeing ----
+
+def test_estimate_seeing_converts_px_to_arcsec():
+    from src.analysis.sensor_health import estimate_seeing
+    from src.detect.psf import FWHM_PER_SIGMA
+
+    est = estimate_seeing([_fit(1.6) for _ in range(20)], SCALE_ARCSEC_PX)
+    assert est.n_stars == 20
+    assert est.n_rejected == 0
+    assert est.fwhm_px == pytest.approx(1.6 * FWHM_PER_SIGMA, rel=1e-12)
+    assert est.fwhm_px == pytest.approx(3.767712, abs=1e-6)
+    assert est.fwhm_arcsec == pytest.approx(est.fwhm_px * SCALE_ARCSEC_PX, rel=1e-12)
+    assert est.elongation_median == pytest.approx(1.0, rel=1e-12)
+
+
+def test_estimate_seeing_uses_median_not_mean():
+    """R149：全部 sigma 相同时 median 与 mean 不可区分，旧测试测不出。
+
+    实测 sigma=[1.2,1.4,1.6,1.8,9.9] -> median 1.6000 / mean 3.1800，
+    FWHM 3.767712 vs 7.488328，差 3.720616 px。一个失控的拟合不该拖动视宁度。
+    """
+    from src.analysis.sensor_health import estimate_seeing
+
+    est = estimate_seeing([_fit(s) for s in (1.2, 1.4, 1.6, 1.8, 9.9)], SCALE_ARCSEC_PX)
+    assert est.n_stars == 5
+    assert est.fwhm_px == pytest.approx(3.767712, abs=1e-6)
+    # 均值会给 7.488328，差 3.720616：钉死这个差，比 != 更有判别力
+    assert abs(est.fwhm_px - 7.488328) == pytest.approx(3.720616, abs=1e-6)
+
+
+def test_estimate_seeing_ignores_failed_fits():
+    from src.analysis.sensor_health import estimate_seeing
+    from src.detect.psf import FWHM_PER_SIGMA
+
+    est = estimate_seeing([_fit(2.0), _fit(9.0, ok=False), _fit(2.0)], SCALE_ARCSEC_PX)
+    assert est.n_stars == 2
+    assert est.n_rejected == 1
+    assert est.fwhm_px == pytest.approx(2.0 * FWHM_PER_SIGMA, rel=1e-12)
+
+
+@pytest.mark.parametrize(
+    "sigma_x,sigma_y",
+    [(0.0, 0.0), (-1.6, -1.6), (-1.6, 1.6), (1e6, 1e6)],
+)
+def test_estimate_seeing_rejects_unphysical_sigma(sigma_x, sigma_y):
+    """R150：sigma<=0 与荒谬大值必须被剔除，而不是算进中位数。
+
+    实测四种穿透：sigma=0 -> fwhm 0.0000；两轴同负 -> 乘积为正、负号被 sqrt
+    吞掉得 3.767712；一正一负 -> sqrt(负)=nan，np.median 把结果整体传染成 nan
+    而 n_stars 照旧计数，随后 to_dict() 里的 nan 让 json.dumps 写出裸 NaN；
+    sigma=1e6 -> fwhm 2354820.0450。四种都能过 isfinite。
+    """
+    from src.analysis.sensor_health import estimate_seeing
+
+    est = estimate_seeing(
+        [_fit(1.6), _fit(sigma_x, sigma_y=sigma_y), _fit(1.6)], SCALE_ARCSEC_PX
+    )
+    assert est.n_stars == 2
+    assert est.n_rejected == 1
+    assert est.fwhm_px == pytest.approx(3.767712, abs=1e-6)
+    json.loads(json.dumps(est.to_dict(), allow_nan=False))
+
+
+def test_estimate_seeing_reports_elongation_as_the_readability_precondition():
+    """R428：拖长比是「这个 FWHM 能不能当星像宽度读」的**前提条件**。
+
+    合成 10:1 拖长（sigma 1.6 / 16.0）实测给 fwhm 11.914552 px、73.6200 arcsec
+    ——这个数不是视宁度。**注意这是构造值，不是实测**：真实数据上拖长比
+    中位数只有 1.20（见 test_dataset_*），前提是成立的。旧任务书把
+    11.914552 写成 11.9151 并称之为「实测」，两处都错（R427/R428）。
+    """
+    from src.analysis.sensor_health import estimate_seeing
+
+    est = estimate_seeing([_fit(1.6, sigma_y=16.0) for _ in range(10)], SCALE_ARCSEC_PX)
+    assert est.elongation_median == pytest.approx(10.0, rel=1e-12)
+    assert est.fwhm_px == pytest.approx(11.914552, abs=1e-6)
+    assert est.fwhm_arcsec == pytest.approx(73.6200, abs=1e-4)
+    assert "拖长" in est.note
+
+
+def test_estimate_seeing_elongation_is_major_over_minor_not_the_reciprocal():
+    """拖长比必须 >= 1。写成 min/max 会给 0.1 而不是 10.0，且沿哪个轴拖长
+    不该改变这个数——两个方向必须给出同一个值。"""
+    from src.analysis.sensor_health import estimate_seeing
+
+    tall = estimate_seeing([_fit(1.6, sigma_y=16.0)], SCALE_ARCSEC_PX)
+    wide = estimate_seeing([_fit(16.0, sigma_y=1.6)], SCALE_ARCSEC_PX)
+    assert tall.elongation_median == pytest.approx(10.0, rel=1e-12)
+    assert wide.elongation_median == pytest.approx(tall.elongation_median, rel=1e-12)
+    assert tall.fwhm_px == pytest.approx(wide.fwhm_px, rel=1e-12)
+
+
+def test_estimate_seeing_without_any_fit():
+    from src.analysis.sensor_health import estimate_seeing
+
+    est = estimate_seeing([], SCALE_ARCSEC_PX)
+    assert est.n_stars == 0
+    assert est.fwhm_px is None and est.fwhm_arcsec is None
+    assert est.elongation_median is None
+    assert "无" in est.note
+    json.loads(json.dumps(est.to_dict(), allow_nan=False))
+
+
+def test_seeing_to_dict_is_json_ready_when_every_fit_is_rejected():
+    """全部被剔的路径也要能序列化——消费方拿到 null 而不是 NaN。"""
+    from src.analysis.sensor_health import estimate_seeing
+
+    est = estimate_seeing([_fit(1e6), _fit(0.0)], SCALE_ARCSEC_PX)
+    assert est.n_stars == 0 and est.n_rejected == 2
+    assert json.loads(json.dumps(est.to_dict(), allow_nan=False))["fwhm_px"] is None
+
+
+# ---- sky_brightness ----
+
+def test_sky_brightness_takes_exposure_from_the_zero_point():
+    """R424：曝光由 zp.exposure_s 携带。两种自洽约定必须给出同一个 mu。
+
+    实测同一批数据两次派生：exposure_s=0.030 -> ZP 21.0546、
+    exposure_s=None -> ZP 17.2474，差 3.807197 = -2.5*log10(0.030)。
+    两条路径的 mu 之差实测 3.55e-15（从函数派生；手写四位字面量会是 3.14e-06，
+    见 R427，所以这里**必须**用 _derive_zp）。
+    """
+    from src.analysis.sensor_health import sky_brightness
+
+    zp_abs, zp_plain = _derive_zp(0.030), _derive_zp(None)
+    assert zp_abs.exposure_s == pytest.approx(0.030)
+    assert zp_plain.exposure_s is None
+    assert (zp_abs.value - zp_plain.value) == pytest.approx(3.807197, abs=1e-6)
+
+    kw = dict(scale_arcsec_px=SCALE_ARCSEC_PX)
+    mu_abs = sky_brightness(6.45, zero_point=zp_abs, **kw)
+    mu_plain = sky_brightness(6.45, zero_point=zp_plain, **kw)
+    assert mu_abs == pytest.approx(mu_plain, abs=1e-9)
+    assert mu_abs == pytest.approx(19.1781, abs=0.001)
+    assert SKY_MU_MIN < mu_abs < SKY_MU_MAX
+
+
+def test_sky_brightness_refuses_a_caller_exposure_that_contradicts_the_zero_point():
+    """R424：不一致**就是** 3.807197 mag 的错，而它可检测，所以必须抛而不是静默挑一边。
+
+    实测：用 exposure_s=None 的零点再除一次 t，19.178117 -> 15.370920。
+    与 calibrate_table（photometry.py:158）已确立的先例同形。
+    """
+    from src.analysis.sensor_health import sky_brightness
+
+    kw = dict(scale_arcsec_px=SCALE_ARCSEC_PX)
+    with pytest.raises(ValueError, match="曝光"):
+        sky_brightness(6.45, zero_point=_derive_zp(None), exposure_s=0.030, **kw)
+    with pytest.raises(ValueError, match="曝光"):
+        sky_brightness(6.45, zero_point=_derive_zp(0.030), exposure_s=0.080, **kw)
+    # 复述一个一致的值是允许的，且不改变结果
+    mu_quiet = sky_brightness(6.45, zero_point=_derive_zp(0.030), **kw)
+    mu_echo = sky_brightness(6.45, zero_point=_derive_zp(0.030), exposure_s=0.030, **kw)
+    assert mu_echo == pytest.approx(mu_quiet, abs=1e-12)
+
+
+def test_sky_brightness_grows_fainter_with_longer_exposure():
+    """R425 载荷断言 (a)：同样的 ADU 读数在更长曝光下意味着更暗的天空。
+
+    实测 0.030 -> 19.178117、0.080 -> 20.243039，delta +1.064922
+    （= 2.5*log10(0.080/0.030)，实测 1.064921830680703）。
+    把 b/t 写成 b*t 的变异体给出 delta −1.064922（递减），被这一条抓到。
+    物理带抓不到它——带的判别力随输入变化，在 b=1 处归零（R425）。
+
+    **两个零点必须共用同一个 value、只换 exposure_s 字段**，不能各自
+    `_derive_zp`。任务书这一条写成 `_derive_zp(0.030)` vs `_derive_zp(0.080)`，
+    但那两次派生用的是同一批 flux/truth_mag，于是
+    ``ZP(t) = ZP(None) − 2.5log10(t)`` 把曝光项吸进了零点，随后 ``b/t``
+    又贡献 ``+2.5log10(t)``，两者**精确抵消**：实测 delta = 0.0（逐位为零），
+    `mu_long > mu_short` 对正确实现就是假的。那个抵消正是
+    `takes_exposure_from_the_zero_point` 断言的同一事实。
+    「同一台设备两个曝光」的正确模型是一个**流量率**零点配两个 exposure_s
+    ——那才给出任务书钉的 +1.064922，且 b*t 变异体在此路径上给 −1.064922。
+    """
+    from src.analysis.sensor_health import sky_brightness
+    from src.astrometry.photometry import ZeroPoint
+
+    rate_zp = _derive_zp(0.030)          # 流量率零点，不手写字面量（R427）
+    kw = dict(scale_arcsec_px=SCALE_ARCSEC_PX)
+    zp_short = ZeroPoint(rate_zp.value, rate_zp.std, rate_zp.n_points, "truth", exposure_s=0.030)
+    zp_long = ZeroPoint(rate_zp.value, rate_zp.std, rate_zp.n_points, "truth", exposure_s=0.080)
+    mu_short = sky_brightness(6.45, zero_point=zp_short, **kw)
+    mu_long = sky_brightness(6.45, zero_point=zp_long, **kw)
+    assert mu_long > mu_short
+    assert (mu_long - mu_short) == pytest.approx(1.064922, abs=1e-6)
+    assert (mu_long - mu_short) == pytest.approx(2.5 * np.log10(0.080 / 0.030), abs=1e-12)
+    # 同一批数据各自重拟零点则曝光项精确抵消——这是不变性，不是单调性
+    assert sky_brightness(6.45, zero_point=_derive_zp(0.080), **kw) == pytest.approx(
+        sky_brightness(6.45, zero_point=_derive_zp(0.030), **kw), abs=1e-9
+    )
+
+
+def test_sky_brightness_grows_brighter_with_more_background():
+    """R425 载荷断言 (b)：背景越高天空越亮（mu 越小），且亮 10 倍恰好差 2.5 mag。
+
+    这一条抓符号翻转。**不要**靠物理带抓它：实测 b=1 ADU 时
+    inst_mag=0，符号翻转与正确实现给出同一个 19.2896，任何带都失效（R425）。
+    旧任务书钉的 17.2115 在十种读法下都复现不出，不得引用。
+
+    b=20.0 的钉值是 **17.949441**，不是任务书写的 17.949416：后者用四位字面量
+    ``ZP=17.2474`` 算出（17.949415986912939），正是 R427 自己禁止的读法；
+    从 ``zero_point_from_truth`` 派生的 ``ZP=17.247425010840050``
+    实测给 **17.949440997752987**，两者差 2.5e-05，远超 abs=1e-6。
+    """
+    from src.analysis.sensor_health import sky_brightness
+
+    kw = dict(zero_point=_derive_zp(None), scale_arcsec_px=SCALE_ARCSEC_PX)
+    assert sky_brightness(20.0, **kw) < sky_brightness(6.45, **kw)
+    assert sky_brightness(20.0, **kw) == pytest.approx(17.949441, abs=1e-6)
+    delta = sky_brightness(6.45, **kw) - sky_brightness(64.5, **kw)
+    assert delta == pytest.approx(2.5, abs=1e-9)
+
+
+def test_sky_brightness_area_normalisation_is_per_arcsec2():
+    """R425 载荷断言 (c)：面积项恰好 2.5*log10(6.179²) = 3.954591 mag，且是**加**的。
+
+    per-arcsec² 的流量比 per-px 小 38.1800 倍，所以星等更暗。
+    丢掉 /s² 在这个算例上给 15.223526（任务书写的 9.5039 是
+    「13.4585 − 3.954591」，而 13.4585 本身是零点错配的产物，不是本函数的输出）。
+    """
+    from src.analysis.sensor_health import sky_brightness
+
+    zp = _derive_zp(None)
+    mu = sky_brightness(6.45, zero_point=zp, scale_arcsec_px=SCALE_ARCSEC_PX)
+    mu_unit = sky_brightness(6.45, zero_point=zp, scale_arcsec_px=1.0)
+    assert (mu - mu_unit) == pytest.approx(3.954591, abs=1e-6)
+    assert (mu - mu_unit) == pytest.approx(2.5 * np.log10(SCALE_ARCSEC_PX ** 2), abs=1e-12)
+    assert mu > mu_unit          # 方向：per-arcsec² 更暗
+
+
+def test_sky_brightness_is_none_without_zero_point():
+    from src.analysis.sensor_health import sky_brightness
+
+    assert sky_brightness(6.45, zero_point=None, scale_arcsec_px=SCALE_ARCSEC_PX) is None
+
+
+@pytest.mark.parametrize("bkg,s", [(0.0, 6.179), (-1.0, 6.179), (6.45, 0.0), (6.45, -1.0)])
+def test_sky_brightness_is_none_for_nonpositive_inputs(bkg, s):
+    """非正输入返回 None，不留 nan，也不留 RuntimeWarning。"""
+    from src.analysis.sensor_health import sky_brightness
+
+    assert sky_brightness(bkg, zero_point=_derive_zp(None), scale_arcsec_px=s) is None
+
+
+def test_sky_brightness_none_survives_json():
+    from src.analysis.sensor_health import sky_brightness
+
+    payload = {"sky_mu": sky_brightness(0.0, zero_point=_derive_zp(None),
+                                        scale_arcsec_px=SCALE_ARCSEC_PX)}
+    assert json.loads(json.dumps(payload, allow_nan=False))["sky_mu"] is None
+
+
+# ---- 真实数据（R428：断言余量必须小，实测值见上表） ----
+
+def _measure(directory, frame=30):
+    from src.analysis.sensor_health import estimate_seeing
+    from src.calib.background import model_background
+    from src.dataio.fits_loader import FrameSequence
+    from src.detect.psf import fit_table
+    from src.detect.segmentation import detect_sources_in_frame
+
+    seq = FrameSequence.from_directory(directory)
+    img = seq.image(frame)
+    model = model_background(img)
+    table = detect_sources_in_frame(img, model, n_sigma=5.0, frame=frame).brightest(80)
+    _, fits = fit_table(model.subtract(img), table)
+    return estimate_seeing(fits, SCALE_ARCSEC_PX), fits, img
+
+
+def test_dataset_b_seeing_is_about_three_and_a_half_pixels(dataset_b_dir):
+    """实测 fwhm_px 3.403649、拖长中位 1.195896、78 个拟合全部通过 sigma 过滤。
+
+    R402：旧任务书的 2.0<x<8.0 在实测 3.40 上余量 1.4/4.6，太松，
+    收紧到 ±0.2。1.0<=elong<20.0 同理收到 1.15..1.30。
+    """
+    est, fits, _ = _measure(dataset_b_dir)
+    assert est.n_stars == 78
+    assert 3.2 < est.fwhm_px < 3.6
+    assert est.fwhm_px == pytest.approx(FWHM_PX_B, abs=0.01)
+    assert est.fwhm_arcsec == pytest.approx(21.031149, abs=0.1)
+    assert 1.15 < est.elongation_median < 1.30
+    assert est.elongation_median == pytest.approx(ELONG_B, abs=0.01)
+    json.loads(json.dumps(est.to_dict(), allow_nan=False))
+
+
+def test_sigma_filter_rejects_nothing_on_real_data(dataset_b_dir):
+    """R428：σ 过滤器 [0.3, 20.0] 在真实数据上实测剔 0 个（σ 跨度 0.883..2.063）。
+
+    它防的是穿透，不是常态——所以报告与 docstring 不得暗示它筛掉了什么。
+    这条断言比 `n_stars >= 20` 更有判别力：过滤器一旦意外变严就立刻红。
+    """
+    est, fits, _ = _measure(dataset_b_dir)
+    assert est.n_rejected == 0
+    assert est.n_stars == sum(1 for f in fits if f.success)
+
+
+def test_seeing_agrees_across_two_epochs(dataset_a_dir, dataset_b_dir):
+    """R428：fwhm_px 是**纯像素量、不含真值**，所以这一条可以当独立自查主张。
+
+    实测跨 134.158023 天、不同曝光（30 vs 40 ms）、不同目标：
+    3.403649 vs 3.409136，差 0.005487 px（相对 0.16%）；拖长比差 0.006821。
+    """
+    est_b, _, _ = _measure(dataset_b_dir)
+    est_a, _, _ = _measure(dataset_a_dir)
+    assert est_a.fwhm_px == pytest.approx(FWHM_PX_A, abs=0.01)
+    assert abs(est_b.fwhm_px - est_a.fwhm_px) < 0.05
+    assert abs(est_b.elongation_median - est_a.elongation_median) < 0.05
+
+
+def test_dataset_b_sky_brightness_is_a_conditional_statement(dataset_b_dir):
+    """R426/R429：这个数的全部信息量在零点里，而零点是真值定出的。
+
+    给定真值零点 15.335125（散度 0.217907）与真值比例尺 6.179，
+    实测数据集 B 第 30 帧全帧中位 6.0 ADU -> mu = 17.344338 mag/arcsec²，
+    落在城市微光夜空（~17）边缘。**这是条件命题，不是独立观测量。**
+    背景中位是整数 ADU，1 ADU 在 6.0 上就是 0.18 mag，所以小数位无意义。
+    """
+    from src.analysis.sensor_health import sky_brightness
+    from src.astrometry.photometry import ZeroPoint
+
+    _, _, img = _measure(dataset_b_dir)
+    bkg = float(np.median(np.asarray(img, dtype=np.float64)))
+    assert bkg == 6.0                       # 整数量化，实测
+    zp = ZeroPoint(ZP_TRUTH_B, ZP_TRUTH_B_STD, 55, "truth", exposure_s=None)
+    mu = sky_brightness(bkg, zero_point=zp, scale_arcsec_px=SCALE_ARCSEC_PX)
+    assert mu == pytest.approx(SKY_MU_B, abs=1e-4)
+    assert SKY_MU_MIN < mu < SKY_MU_MAX
+    # 零点是唯一的信息来源：平移零点 1 mag，mu 平移 1 mag
+    zp2 = ZeroPoint(ZP_TRUTH_B + 1.0, ZP_TRUTH_B_STD, 55, "truth", exposure_s=None)
+    mu2 = sky_brightness(bkg, zero_point=zp2, scale_arcsec_px=SCALE_ARCSEC_PX)
+    assert (mu2 - mu) == pytest.approx(1.0, abs=1e-9)

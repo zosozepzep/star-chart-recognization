@@ -43,7 +43,9 @@ from dataclasses import dataclass, field
 import numpy as np
 from scipy.spatial import cKDTree
 
+from src.astrometry.photometry import instrumental_mag
 from src.config import load_config
+from src.detect.psf import FWHM_PER_SIGMA
 
 _CFG_CACHE: dict | None = None
 
@@ -298,3 +300,147 @@ def compare_epochs(
     res.only_in_a = [c for i, c in enumerate(report_a.clusters) if i not in matched_a]
     res.only_in_b = [c for j, c in enumerate(report_b.clusters) if j not in matched_b]
     return res
+
+
+@dataclass(frozen=True)
+class SeeingEstimate:
+    """一帧的合成星像宽度。
+
+    ``fwhm_px`` 与 ``elongation_median`` 是**纯像素量，不含真值**；
+    ``fwhm_arcsec`` 乘了真值定出的板比例（6.179 ″/px，
+    ``TruthReport.plate_scale_arcsec_px``），**是真值定标量**。
+    报告引用后者时不得称为独立观测结论（R426）。
+    """
+
+    n_stars: int
+    n_rejected: int = 0
+    fwhm_px: float | None = None
+    fwhm_arcsec: float | None = None
+    elongation_median: float | None = None
+    note: str = ""
+
+    def to_dict(self) -> dict:
+        return {
+            "n_stars": int(self.n_stars),
+            "n_rejected": int(self.n_rejected),
+            "fwhm_px": _finite_or_none(self.fwhm_px),
+            "fwhm_arcsec": _finite_or_none(self.fwhm_arcsec),
+            "elongation_median": _finite_or_none(self.elongation_median),
+            "note": self.note,
+        }
+
+
+def estimate_seeing(fits, scale_arcsec_px: float) -> SeeingEstimate:
+    """由收敛的高斯拟合给出合成星像宽度。
+
+    只取 ``success=True`` 且两轴 sigma 都落在配置区间内的拟合。四种非物理
+    sigma 都能穿过单纯的 ``isfinite`` 检查：``sigma=0`` 给 FWHM 0.0；两轴同为
+    负时乘积为正、负号被 ``sqrt`` 吞掉，得到与正常值无法区分的 3.767712；
+    一正一负则 ``sqrt`` 得 ``nan``，``np.median`` 把整个结果传染成 ``nan``
+    而 ``n_stars`` 照旧计数；``sigma=1e6`` 给 2354820.0450。所以要区间而非
+    ``isfinite``。真实数据上这个区间实测剔 0 个（sigma 跨度 0.883-2.063），
+    它防的是穿透，不是常态筛选。
+
+    sigma 用两轴几何平均，对轻微拖长比算术平均稳（实测 2:1 拖长下几何 σ
+    2.2627 vs 算术 2.4000）。用中位数而非均值：实测
+    ``sigma=[1.2,1.4,1.6,1.8,9.9]`` 时中位数给 FWHM 3.767712、均值给 7.488328，
+    差 3.720616 px，一个失控的拟合不该拖动结论。
+
+    **返回的是「探测器 + 大气 + 跟踪拖长」的合成宽度，不是大气视宁度**，
+    因此 ``elongation_median`` 必须与数字一起返回——拖长比是这个数字可读性的
+    **前提条件**。合成 10:1 拖长时几何平均给 FWHM 11.914552 px
+    （73.6200 arcsec），那显然不是视宁度；而本项目两个历元实测拖长比中位数
+    只有 1.1959 / 1.2027（最长的单个源 2.65:1），所以前提成立，
+    3.40 px 这个数可以当星像宽度读。
+    """
+    cfg = _sensor_cfg()
+    lo = float(cfg["sigma_min_px"])
+    hi = float(cfg["sigma_max_px"])
+
+    sig: list[float] = []
+    elong: list[float] = []
+    n_rejected = 0
+    for f in fits:
+        sx, sy = float(f.sigma_x), float(f.sigma_y)
+        if not (f.success and np.isfinite(sx) and np.isfinite(sy)):
+            n_rejected += 1
+            continue
+        if not (lo <= sx <= hi and lo <= sy <= hi):
+            n_rejected += 1
+            continue
+        sig.append(float(np.sqrt(sx * sy)))
+        elong.append(float(max(sx, sy) / min(sx, sy)))
+
+    if not sig:
+        return SeeingEstimate(
+            n_stars=0, n_rejected=n_rejected, note="无可用的 PSF 拟合，星像宽度不可估"
+        )
+    fwhm = float(np.median(sig)) * FWHM_PER_SIGMA
+    return SeeingEstimate(
+        n_stars=len(sig),
+        n_rejected=n_rejected,
+        fwhm_px=fwhm,
+        fwhm_arcsec=fwhm * float(scale_arcsec_px),
+        elongation_median=float(np.median(elong)),
+        note="含跟踪拖长的合成星像宽度，非纯大气视宁度；可读性前提见 elongation_median",
+    )
+
+
+def sky_brightness(
+    bkg_median_adu,
+    *,
+    zero_point,
+    scale_arcsec_px,
+    exposure_s: float | None = None,
+) -> float | None:
+    """天光背景面亮度（mag/arcsec²）。
+
+        mu = ZP - 2.5 log10( B / t ) + 2.5 log10( s^2 )   当 zp.exposure_s 给出
+        mu = ZP - 2.5 log10( B )     + 2.5 log10( s^2 )   当 zp.exposure_s 是 None
+
+    **曝光时间取自 ``zero_point.exposure_s``，不由调用方决定**（与
+    ``calibrate_table`` 同一先例）。``exposure_s`` 只是允许调用方显式复述的
+    覆盖参数，``None``（默认）表示「不复述、沿用零点」；给出而与
+    ``zp.exposure_s`` 不一致时抛 ``ValueError``。理由：那个不一致**就是**
+    ``-2.5 log10(t)`` 的整体平移（t=0.030 s 时实测 3.807197 mag），
+    静默采用其中一边会让 mu 从 19.178117 变成 15.370920 而没有任何痕迹，
+    而它是**可检测的**，所以不该挑一边。
+
+    面积项是**加**的：per-arcsec² 的流量比 per-px 小 ``s²`` 倍
+    （6.179 ″/px 时 38.1800 倍），所以星等更暗，实测 +3.954591 mag。
+    丢掉这一项在同一算例上给 15.223526。
+
+    **这个数的全部信息量在零点里**：平移零点 1 mag，mu 平移 1 mag。
+    本项目的零点由真值定出（15.335125，散度 0.217907），板比例也由真值定出，
+    所以这是条件命题「给定该零点则 mu = 17.34」，**不是独立观测量**（R426）。
+    实测数据集 B 第 30 帧 6.0 ADU -> 17.344338，A 第 30 帧 5.0 ADU -> 17.542291，
+    落在城市微光夜空边缘。背景中位是整数 ADU，1 ADU 在 6.0 上折 0.18 mag，
+    所以报告不要写小数位。
+
+    零点不可用、或背景/板比例非正时返回 ``None``——绝不用未定标的仪器值
+    冒充面亮度。
+    """
+    if zero_point is None:
+        return None
+
+    zp_exposure = zero_point.exposure_s
+    if exposure_s is not None:
+        if zp_exposure is None or not np.isclose(
+            float(exposure_s), float(zp_exposure), rtol=0.0, atol=1e-12
+        ):
+            raise ValueError(
+                f"曝光时间与零点记录不一致: 零点 {zp_exposure!r}，调用方 {exposure_s!r}"
+            )
+
+    b = float(bkg_median_adu)
+    s = float(scale_arcsec_px)
+    if not (b > 0.0 and s > 0.0):
+        return None
+    rate = b if zp_exposure is None else b / float(zp_exposure)
+    if not rate > 0.0:
+        return None
+    return float(
+        zero_point.value
+        + float(instrumental_mag(np.array([rate]))[0])
+        + 2.5 * np.log10(s * s)
+    )
