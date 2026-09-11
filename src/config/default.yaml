@@ -96,4 +96,18 @@ sensor_health:
 
 viz:
   dpi: 150
-  font_candidates: ["Noto Sans CJK SC", "Noto Sans CJK JP", "DejaVu Sans"]
+  # 实测（matplotlib 3.10.9，本镜像 20 个可见字体，见 probe/t26-font.txt）：
+  # SimHei 是唯一带汉字的字体（28562 字形，本项目 FIGURE_CJK 全部覆盖），
+  # 其余 19 个（DejaVu 5 个 + STIX 7 个 + cm 7 个）在同一套字符上全部 100% 缺失。
+  # Noto 两项与 WenQuanYi 在本镜像里都不存在，留在表里只为换交付镜像时优先命中
+  # —— 本镜像的实测选中结果必然是 SimHei。
+  # DejaVu Sans 已删除：它存在、名字查得到、汉字一个没有，留在表里的唯一作用
+  # 是让选择逻辑「成功」选中一个把每个汉字画成空心方框的字体。
+  # 回落由 matplotlib 自己兜底，不需要我们显式列出。
+  font_candidates: ["SimHei", "Noto Sans CJK SC", "Noto Sans CJK JP", "WenQuanYi Zen Hei"]
+  # 「这张图真的画了东西」的字节下界。实测（dpi=150，11 档 figsize，
+  # 见 probe/t26-bytes.txt）：纯空白图最大 11288、空坐标轴图最大 20396、
+  # 裸三点折线最小 23643。取 24000 —— 高于任何空坐标轴图。
+  # 注意它挡不住「画了中文标签但没画数据」的图：那种图仅标签就有 46983 字节起，
+  # 所以口径断言（probe 的 all_labels 与各图特有量）才是主判据，字节数只是地板。
+  min_real_figure_bytes: 24000
