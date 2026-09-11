@@ -89,9 +89,18 @@ class RepeatabilityCurve:
     match_radius_px: float = 3.0
 
     def to_dict(self) -> dict:
+        """转成可 ``json.dumps`` 的纯 python 结构。
+
+        ``frames`` 与 ``match_radius_px`` 必须显式转型：调用方拿到的帧号常常是
+        ``np.int64``（来自 numpy 索引），半径常常是 ``np.float64``（来自配置解析或
+        算术），而 ``json.dumps`` 对 numpy 标量抛
+        ``TypeError: Object of type int64 is not JSON serializable``。point 内六个
+        字段在 ``scan_thresholds`` 构造时已转过，这两个字段原先没有——同
+        ``d9a4065`` 堵掉的三条静默产出非法 JSON 的路属同一类。
+        """
         return {
-            "frames": list(self.frames),
-            "match_radius_px": self.match_radius_px,
+            "frames": [int(f) for f in self.frames],
+            "match_radius_px": float(self.match_radius_px),
             "points": [
                 {
                     "n_sigma": p.n_sigma,
@@ -116,12 +125,29 @@ class RepeatabilityCurve:
 
         选的是 ``reproducibility`` 而不是 ``purity``：参数名就是
         ``min_reproducibility``，两者在帧探测数不等时会给出不同排序。
+
+        达标判据写成 ``not point.reproducibility >= min_reproducibility`` 而不是
+        ``< min_reproducibility``，是为了把 ``nan`` 归入**不达标**：``nan < 0.85``
+        为 ``False``，正向写法会让一个 nan 档被当作达标、连同它以下的档一起进入
+        合格后缀（实测曲线 ``[(3.0, 0.90), (5.0, nan)]`` 门限 0.85 下会返回 3.0σ）。
+        **nan 在当前通路上不可达**——``cross_frame_repeatability`` 对空参考帧走的是
+        早返回、给的是 ``0.0`` 而非 ``0/0``，所以这不是今天会出错的缺陷。这个写法
+        防的是那条早返回被改成按定义算 ``0/0``，或从 ``to_dict()`` 反序列化重建
+        曲线时 nan 从外部流进来（裁决 377）。
+
+        **已知局限（裁决 377 附记，本轮只记录不修）**：``n_sigma`` 有重复值时结果
+        依赖插入顺序。实测同为 5.0σ、复现率 0.90 与 0.10、门限 0.85：插入序
+        ``(0.90, 0.10)`` 抛 ``ValueError``（且消息自称「最高为 0.900」，自相矛盾），
+        插入序 ``(0.10, 0.90)`` 返回 5.0σ。``sorted`` 是稳定排序，同键保持原序，
+        所以后缀扫描先遇到哪一个取决于调用方的构造顺序。``scan_thresholds`` 从
+        ``sigmas`` 列表逐档构造，重复 sigma 需要调用方主动传重复值，不是现实入口；
+        去重留到出图任务再看。
         """
         ordered = sorted(self.points, key=lambda p: p.n_sigma)
         best: RepeatabilityPoint | None = None
         # 从高 sigma 往低走，一旦遇到不达标的档就停：此前累积的即是合格后缀。
         for point in reversed(ordered):
-            if point.reproducibility < min_reproducibility:
+            if not point.reproducibility >= min_reproducibility:
                 break
             best = point
         if best is None:
@@ -237,8 +263,38 @@ def cross_frame_repeatability(
 
     空帧在命中统计里被跳过（它无法证实也无法否证任何源），因此也**不进纯度的
     分母**——只让它压低分母会使一个彻底失败的帧把纯度抬高 20%（裁决 66）。
+
+    两个参数守卫（裁决 373 / 374）——被保护的性质是**非法参数不得静默产出可流下游
+    的比值**，而这两处的失效模式都不留痕迹：
+
+    - ``min_fraction`` 越出 ``(0, 1]`` 时两个方向都坏。实测 6 帧 × 10 个全同源：
+      ``1.0000001 / 1.1 / 1.5 / 2.0`` 返回 ``(0, 0.0, 0.0)``，与「判据合法但一个源
+      都没复现」（纯噪声 fixture 实测同为 ``(0, 0.0, 0.0)``）**完全同形**；而
+      ``-1.0 / 0.0`` 被 ``min_hits_for`` 的 ``max(2, ...)`` 夹成最松判据、返回
+      ``(10, 1.0, 1.0)``，**复现率虚高**。上界那一侧不是「碰巧为 0」：``hits`` 的
+      上界可证为 ``len(frames)``（参考帧自记 1 次，其余至多 ``n_frames - 1`` 次），
+      所以 ``min_hits > n_frames`` 时判据结构上恒为空。且 ``1.0`` 与 ``1.0000001``
+      之间没有缓冲，而从 YAML 读浮点数出现这个量级的漂移很常见。
+    - ``match_radius`` 在本函数里原先完全无校验（守卫只在
+      ``expected_neighbours_per_source``，而本函数不调它）。实测
+      ``0.0 / -3.0 / nan`` 返回 ``(0, 0.0, 0.0)``，而 ``inf`` 返回
+      ``(10, 1.0, 1.0)``——把判据放到最松的极限**输出的却是最漂亮的数字**。
+      条件写成 ``not match_radius > 0.0`` 而非 ``match_radius <= 0.0``，因为
+      ``nan <= 0.0`` 为 ``False``，正向写法拦不住 nan。
+
+    内存量级（调用方须知）：本函数把每帧的天球坐标全量驻留在 ``frames`` 列表里，
+    ``scan_thresholds`` 还要把每帧的图像与背景模型各驻留一份。4096² float64 单幅
+    约 134 MB，6 帧 × 3 幅（图像 + 背景 + rms）就是 GB 量级常驻。**``frames``
+    不是随手可加大的参数**——它同时决定驻留量与结构上限（源要活过
+    ``min_hits - 1`` 步才可能复现）。具体峰值 RSS 本项目未实测，此处只给量级。
     """
+    if not 0.0 < min_fraction <= 1.0:
+        raise ValueError(f"min_fraction 必须落在 (0, 1]，实际 {min_fraction}")
+    if not match_radius > 0.0 or not math.isfinite(match_radius):
+        raise ValueError(f"匹配半径必须为正的有限值，实际 {match_radius}")
+
     frames = [np.asarray(p, dtype=np.float64).reshape(-1, 2) for p in sky_positions]
+
     if len(frames) < 2:
         raise ValueError("可复现性统计至少需要 2 帧")
 
@@ -296,6 +352,12 @@ def scan_thresholds(
 
     背景模型逐帧建一次、跨全部 sigma 复用：阈值只改 ``n_sigma * rms`` 这个乘数，
     背景本身与阈值无关，而建模是整条流水线最贵的一步（实测 4096² 单帧约 1.48 s）。
+
+    内存量级（调用方须知）：为了复用，``images`` 与 ``models`` 把**全部** ``frames``
+    的图像与背景模型同时驻留。4096² float64 单幅约 134 MB，``frames`` 取 6 时
+    仅这两个字典就是 GB 量级；``sigmas`` 不影响驻留量（逐档循环、探测表随即释放）。
+    所以 ``frames`` 不是随手可加大的参数——它同时决定驻留量与结构上限。
+    具体峰值 RSS 本项目未实测，此处只给量级。
     """
     frames = list(frames)
     background_kwargs = dict(background_kwargs or {})
