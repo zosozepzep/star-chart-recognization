@@ -1,22 +1,19 @@
-FROM ubuntu:22.04
+# Core pipeline needs CPU scientific Python and a CJK font, not CUDA / PyTorch.
+FROM python:3.11-slim-bookworm
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    MPLBACKEND=Agg
+    MPLBACKEND=Agg \
+    PYTHONPATH=/workspace
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        python3.10 \
-        python3-pip \
-        source-extractor \
         fonts-noto-cjk \
     && rm -rf /var/lib/apt/lists/*
 
-RUN ln -sf /usr/bin/python3 /usr/bin/python
-
 COPY requirements.txt /tmp/requirements.txt
-RUN pip3 install --no-cache-dir --upgrade pip \
-    && pip3 install --no-cache-dir -r /tmp/requirements.txt
+RUN python -m pip install --no-cache-dir --only-binary=:all: -r /tmp/requirements.txt \
+    && python -m pip check
 
 WORKDIR /workspace
 CMD ["bash"]

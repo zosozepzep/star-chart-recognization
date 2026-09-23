@@ -2,7 +2,7 @@
 """教程 01：读序列、看头部、切跟踪段。
 
 容器内运行：
-    SC_IMAGE=star-chart:cpu-interim bash scripts/dr.sh python examples/01_load.py
+    bash scripts/dr.sh python examples/01_load.py
 
 这一步不做任何探测，只回答「这批数据是什么」。约 3 秒。
 """

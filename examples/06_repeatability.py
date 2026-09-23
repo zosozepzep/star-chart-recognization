@@ -2,7 +2,7 @@
 """教程 06：阈值-复现率曲线（「为什么只报 10² 颗星」的定量依据）。
 
 容器内运行：
-    SC_IMAGE=star-chart:cpu-interim bash scripts/dr.sh python examples/06_repeatability.py
+    bash scripts/dr.sh python examples/06_repeatability.py
 
 **约 100 秒**（两个数据集合计）。九档 sigma × 2 个数据集 × 6 帧，
 背景模型逐帧建一次跨全档复用，但仍然是 GB 级驻留（4096² float64 单幅 134 MB）。

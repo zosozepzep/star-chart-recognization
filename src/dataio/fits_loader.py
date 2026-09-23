@@ -49,6 +49,7 @@ class FrameHeader:
     site_lon_deg: float
     site_lat_deg: float
     site_alt_m: float
+    space_aux: dict | None = None
 
     @property
     def exposure_s(self) -> float:
@@ -60,6 +61,22 @@ def read_header(path: str | Path, index: int) -> FrameHeader:
     with fits.open(path) as hdul:
         hdul.verify("silentfix")
         hdr = hdul[0].header
+        auxiliary = None
+        # Zero site coordinates alone are insufficient: require a physically
+        # valid telemetry payload and matching platform pointing as well.
+        if all(float(hdr.get(k, float('nan'))) == 0 for k in ('SITELONG', 'SITELATI', 'SITEALTI')):
+            from src.dataio.space_metadata import decode_auxiliary
+            with path.open('rb') as fh:
+                fh.seek(hdul[0].fileinfo()['datLoc'])
+                raw = fh.read(208)
+            try:
+                auxiliary = decode_auxiliary(raw)
+            except ValueError:
+                pass
+            if auxiliary is not None and not np.allclose(
+                    [auxiliary['p_az'], auxiliary['p_el']],
+                    [parse_pointing(hdr['AZIMUTH']), parse_pointing(hdr['ELEVATIO'])], atol=1e-4):
+                raise ValueError('天基首行指向与 FITS 头不一致')
         return FrameHeader(
             index=index,
             path=path,
@@ -70,6 +87,7 @@ def read_header(path: str | Path, index: int) -> FrameHeader:
             site_lon_deg=float(hdr["SITELONG"]),
             site_lat_deg=float(hdr["SITELATI"]),
             site_alt_m=float(hdr["SITEALTI"]),
+            space_aux=auxiliary,
         )
 
 
@@ -77,7 +95,8 @@ def load_image(path: str | Path) -> np.ndarray:
     """读取像素数据为 float64。
 
     BITPIX=16 + BZERO=0 → astropy 返回有符号 >i2（上限 32767）；
-    本数据集实测最大 28190，未接近溢出。
+    历史地基数据实测最大 28190；官方天基数据确实包含负值，保留原始
+    有符号含义。天基分析分支单独屏蔽异常像素，绝不无依据地转无符号。
     """
     with fits.open(Path(path)) as hdul:
         hdul.verify("silentfix")
@@ -120,6 +139,13 @@ class FrameSequence:
 
     def __len__(self) -> int:
         return len(self.headers)
+
+    @property
+    def observation_mode(self) -> str:
+        flags = [h.space_aux is not None for h in self.headers]
+        if any(flags) and not all(flags):
+            raise ValueError('序列混合天基与地基格式，或部分帧的辅助数据损坏')
+        return 'space' if all(flags) and flags else 'ground'
 
     def image(self, index: int) -> np.ndarray:
         return load_image(self.headers[index].path)

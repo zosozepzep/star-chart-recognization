@@ -1,14 +1,31 @@
 # 太空目标识别系统
 
-从地基望远镜的 FITS 序列里找出人造天体，并给出可复现的定量结论。
+处理官方天基图像与历史地基 FITS 序列，输出星点候选、星等估计和运动轨迹。
 
-核心方法是**双坐标系目标判决**：把每一帧配准到同一天球参考系后，恒星在天球系
+**第 19 届官方数据已适配**：将 15 张 FITS 放在 `data/rst19/`，执行：
+
+```powershell
+.\scripts\dr.ps1 python -m src.cli --input data/rst19 --reference-frame 7 --catalog docs/reference/rst19-gaia-dr3.csv --output output/rst19-run
+```
+
+`7` 表示第 8 张图，演示暂用此帧；比赛指定其他图时修改帧号。天基辅助数据自动校验，
+运行不需要联网。实测 26 条运动候选、294 行轨迹位置；该帧 12,842 个跨帧恒星候选，
+最暗候选约 14.53 等（Gaia G 参照估计）。判据、限制、官网参考资料用途及复现说明见
+[`官方天基数据实测`](docs/reports/rst19-2026-09-23.md)。运行环境仍使用现有约 1.01 GB 的 CPU 镜像。
+
+历史地基流程的方法是**双坐标系目标判决**：把每一帧配准到同一天球参考系后，恒星在天球系
 静止、在探测器系随机架扫动；人造目标反过来——在探测器系近乎不动、在天球系高速
 掠过。数据集 B 实测两个速度差 **68.4 倍**（探测器系 1.84 px/帧、天球系
 126.10 px/帧），判决不依赖任何真值文件。
 
-所有数字都在容器里实测过，逐条记在 [`docs/reports/measurements.md`](docs/reports/measurements.md)。
-本 README 里出现的每个数，你都可以用 `examples/` 下的脚本自己跑出来。
+历史指标逐条记在 [`docs/reports/measurements.md`](docs/reports/measurements.md)，
+可用 `examples/` 下的脚本复现；新增比赛入口的实测见
+[`交付验证记录`](docs/reports/delivery-2026-09-23.md)。
+
+**源码提交（压缩后 ≤200 MB）**：运行 `python scripts/package_source.py`，生成
+`dist/star-chart-source.zip`。打包范围、数据放置和运行环境见
+[`docs/delivery.md`](docs/delivery.md)。原始 FITS、演示图片和 Docker 镜像单独管理。
+日常目录用途和历史文件恢复方法见 [`目录说明`](docs/workspace.md)。
 
 ---
 
@@ -16,25 +33,32 @@
 
 ### 0. 前置条件
 
-需要 Docker，以及 `data/images/` 下的两个数据集目录。**宿主机不需要装 Python 依赖**
+需要 Docker，以及 `data/rst19/` 官方数据；运行下文历史教程时另需 `data/images/`
+下的两个地基数据集目录。**宿主机不需要装 Python 依赖**
 （astropy / photutils / scipy 只在镜像里）。
 
-当前可用镜像只有一个：
+首次运行先构建 CPU 镜像（Python 3.11、固定版本依赖、Noto 中文字体）：
 
 ```bash
-docker images | grep star-chart
-# star-chart:cpu-interim   21GB
+docker build -f docker/Dockerfile.cpu -t star-chart:cpu .
 ```
 
-`scripts/dr.sh` 的默认镜像名是 `star-chart:cpu`，**它不存在**。所以下面每条命令
-都显式带 `SC_IMAGE=star-chart:cpu-interim`。
+`scripts/dr.sh` 和 Windows 的 `scripts/dr.ps1` 优先使用 `star-chart:cpu`；
+尚未构建时可自动使用已有的 `star-chart:cpu-interim`（21 GB）。设置 `SC_IMAGE`
+可明确指定其他已安装镜像。脚本会先检查 Docker 和镜像，避免演示时隐式下载。
 
-> **不要执行 `docker build` 或 `docker-compose up --build`。** 详见「已知限制」。
+Windows PowerShell 示例（宿主机不需要科学计算依赖）：
+
+```powershell
+.\scripts\dr.ps1 python examples/01_load.py
+```
+
+新镜像的验证记录见 [`docs/delivery.md`](docs/delivery.md)。
 
 ### 1. 冒烟测试：读数据（约 3 秒）
 
 ```bash
-SC_IMAGE=star-chart:cpu-interim bash scripts/dr.sh python examples/01_load.py
+bash scripts/dr.sh python examples/01_load.py
 ```
 
 应看到：
@@ -48,10 +72,27 @@ SC_IMAGE=star-chart:cpu-interim bash scripts/dr.sh python examples/01_load.py
   跟踪段         = f16-f70，共 55 帧
 ```
 
+### 比赛入口：指定图像、最暗恒星候选与结果导出
+
+```powershell
+.\scripts\dr.ps1 python -m src.cli --input data/images/60385_20260722_1485695076008039_PIC_POS --reference-frame 30 --calibrate-from-truth
+```
+
+Linux / Git Bash 将 `.\scripts\dr.ps1` 换成 `bash scripts/dr.sh`。
+默认在 `output/run-日期-时间/` 输出 `report.json`、`stars.csv`、`targets.csv` 和
+`faintest-star.png`；目标表包含全部
+判定成功的目标及逐帧坐标。已有非空输出目录会被保护，再次运行请指定新目录。
+
+`--reference-frame` 是按观测时间排序的 0-based 帧号。默认核验该帧附近 6 帧，至少
+4 帧一对一匹配后才计入恒星候选；最暗者从这些候选的固定孔径流量中实际选取，并标注位置。
+只有显式提供 `--calibrate-from-truth` 才在识别完成后读取 `.DAT` 拟合零点；否则
+定标星等为 `null`。这个新指标与下文保留的历史“95 百分位星等”不同，详见
+[`比赛核查记录`](docs/competition-review.md) 和 [`本次实测`](docs/reports/delivery-2026-09-23.md)。
+
 ### 2. 主链：探测 → 配准 → 目标判决（约 105 秒）
 
 ```bash
-SC_IMAGE=star-chart:cpu-interim bash scripts/dr.sh python examples/02_detect_register_target.py
+bash scripts/dr.sh python examples/02_detect_register_target.py
 ```
 
 关键输出：
@@ -84,19 +125,19 @@ SC_IMAGE=star-chart:cpu-interim bash scripts/dr.sh python examples/02_detect_reg
 ### 4. 测试套件（约 14 分钟）
 
 ```bash
-SC_IMAGE=star-chart:cpu-interim bash scripts/dr.sh \
-  python -m pytest tests -q --junitxml=suite.xml -p no:cacheprovider
+bash scripts/dr.sh python -m pytest tests -q --junitxml=output/suite.xml -p no:cacheprovider
 ```
 
-只认 `suite.xml` 里 `<testsuite>` 标签的属性，不要读终端汇总行：
+历史基线 `probe/fr-full2.xml`（已收入本地 `archive/2026-09-23-project-cleanup.zip`）的 `<testsuite>` 标签为：
 
 ```xml
 <testsuite name="pytest" errors="0" failures="0" skipped="6" tests="569" ...>
 ```
 
-当前基线 **569 通过 / 0 失败 / 0 错误 / 6 跳过**（5 skip + 1 xfail，逐条原因见
-「已知限制」）。必须用 `python -m pytest` 而不是裸 `pytest`，否则 `PYTHONPATH`
-不生效。
+历史基线是 **569 条测试总计，563 通过 / 0 失败 / 0 错误 / 6 跳过**
+（5 skip + 1 xfail，逐条原因见「已知限制」）。JUnit 的 `tests` 包含跳过项，
+不能将 569 写成通过数。新增交付检查和新镜像的结果见 `docs/delivery.md`。
+使用 `python -m pytest` 从项目根目录运行，确保 `src` 可被导入。
 
 ---
 
@@ -170,11 +211,11 @@ SC_IMAGE=star-chart:cpu-interim bash scripts/dr.sh \
    它只对单帧源表取百分位，全程没有跨帧比对或注入-回收。
 5. **轨迹图的位置轴是恒星系像素，不是赤经赤纬。** FITS 头没有 WCS、没有焦距、
    没有像元尺寸，`ra_deg` / `dec_deg` / `pa_deg` 在当前范围里恒为 `None`；位置角同理不报。
-6. **只能说「真值仅用于验证与星等零点，识别链本身不读真值」**，不能说「架构级真值
-   隔离」——那个守卫（Task 13）尚未落地。前一句读代码就能验：`src/detect/`、
-   `src/register/`、`src/target/`、`src/validate/repeatability.py` 都不 import
-   `src.validate.truth`。
-7. **数据集 A 有没有可探测目标，是个还没测的事实。** 全部目标结论都出自数据集 B。
+6. **真值仅用于验证与星等零点，识别链本身不读真值。**
+   `tests/test_architecture.py` 检查推理入口、探测/配准/跟踪与恒星确认模块的传递导入，
+   防止通过间接依赖引入 `src.validate.truth`。它是源码导入约束，不是安全沙箱。
+7. **数据集 A 无真值。** 新入口在 A 上检出 1 条候选轨迹（31 帧），仅能主张双坐标系
+   判据通过；B 的真值验证结论不能移用于 A。详见本次实测记录。
 
 ---
 
@@ -203,6 +244,8 @@ SC_IMAGE=star-chart:cpu-interim bash scripts/dr.sh \
 
 ```
 src/
+  cli.py                 可指定数据、帧号的比赛入口，CSV/JSON 与最暗恒星标注
+  pipeline.py            不依赖真值的识别流水线
   pointset.py            点集形状校验（as_xy）：全项目点集统一 (N,2) float64 [x, y]
   dataio/fits_loader.py  FITS 序列读取（头部三处非标准写法要 verify('silentfix')）
   calib/
@@ -220,6 +263,7 @@ src/
     dual_frame.py        **双坐标系目标判决**（本项目主亮点）
     trajectory.py        目标轨迹与逐步角速度（派生 1）
   analysis/
+    star_catalog.py      一对一跨帧恒星确认与最暗候选选取
     orbit.py             圆轨道高度反演（派生 2）
     sensor_health.py     传感器健康报告 + 视宁度 + 天光面亮度（派生 4/5）
   astrometry/
@@ -233,7 +277,7 @@ src/
 
 坐标系约定：**0-based，x = 列，y = 行，画面中心 (2047.5, 2047.5)**。
 
-真值隔离（代码层面，非架构守卫）：`src/detect/`、`src/register/`、`src/target/`、
+真值隔离（传递导入测试）：`src/detect/`、`src/register/`、`src/target/`、
 `src/validate/repeatability.py` 均不 import `src.validate.truth`。`photometry.py`
 的零点标定是**显式允许**的真值用途。
 
@@ -241,15 +285,12 @@ src/
 
 ## 已知限制
 
-### 镜像从未构建过
+### 运行环境与中文字体
 
-`docker/Dockerfile.cpu` **没有被构建过一次**。当前镜像 `star-chart:cpu-interim`
-里的 SimHei 中文字体是手工 `COPY` 进去的，**不属于任何 apt 包**——Dockerfile 里的
-`fonts-noto-cjk` 在这个镜像里实际不存在。
-
-后果：**首次真实 `docker build` 之后，必须重跑 `tests/viz/test_figures.py` 的四条
-字体测试**，否则 `setup_matplotlib()` 会抛 `FontUnavailable`，8 张图一张也画不出来。
-容器内无网络，所以这一步没法在当前环境里关闭。
+历史实测使用 `star-chart:cpu-interim`，其中的 SimHei 是手工复制的字体。
+当前 CPU Dockerfile 改用轻量 Python 基础镜像，并通过 `fonts-noto-cjk` 安装字体。
+重建或替换镜像后，运行 `tests/viz/test_figures.py` 检查字体与图表；构建状态及
+实测大小统一记在 [`docs/delivery.md`](docs/delivery.md)。
 
 字体守卫是**字形级**的，不是名字级：`FIGURE_CJK` 的 307 个字符里 SimHei 缺 0 个，
 DejaVu Sans 缺 304 个。只查字体名会成功选中一个把每个汉字画成空心方框的字体。
@@ -258,7 +299,7 @@ DejaVu Sans 缺 304 个。只查字体名会成功选中一个把每个汉字画
 
 | 数量 | 原因 |
 |---|---|
-| 4 | TLE 交叉校验：容器无网络，`docs/reference/tle.txt` 尚未抄入真实两行根数 |
+| 4 | TLE 交叉校验：`docs/reference/tle.txt` 尚未提供相应观测历元的真实两行根数 |
 | 1 | GPU 后端：本机无 NVIDIA 驱动 |
 | 1 (xfail) | 数据集 B 5σ 复现率实测 **0.6304**，低于任务书门限 0.85 |
 
@@ -267,25 +308,27 @@ DejaVu Sans 缺 304 个。只查字体名会成功选中一个把每个汉字画
 
 ### 当前范围之外
 
-按 [`scope-mvp.md`](.superpowers/sdd/2026-09-08-太空目标识别系统/scope-mvp.md)（未入库）
-的裁剪，以下推到后续阶段：统一命令行入口、CSV/JSON/.DAT 输出、滑窗叠加、
+当前算法范围未包含：含赤经赤纬的 `.DAT` 输出、滑窗叠加、
 像素系↔赤道系定向标定、盲板求解、光变曲线、SExtractor 交叉匹配、跨数据集回归。
 
-所以现在**没有 CLI**——`examples/` 下的七个脚本就是入口。
+统一入口为 `python -m src.cli`，`examples/` 下的七个脚本保留为历史指标的复现教程。
+本次新增入口仍面向现有地基 FITS 格式，不声称已验证规则中的 15 张天基图像。
 
 ---
 
 ## 常见问题
 
 **`Unable to find image 'star-chart:cpu'`**
-`scripts/dr.sh` 的默认镜像名不存在。加 `SC_IMAGE=star-chart:cpu-interim`。
+先运行上面的 CPU 构建命令。启动脚本会在默认镜像缺失时使用已有 interim 镜像；
+显式设置了 `SC_IMAGE` 时只使用所指定的镜像。
 
 **`WARNING: File may have been truncated`**
 数据本身的 FITS 长度字段与实际字节数差 448 字节，astropy 的正常提示，已在
 `pytest.ini` 里过滤。不影响像素数据。
 
 **`WARNING: The NVIDIA Driver was not detected`**
-基础镜像带 CUDA，本机无 GPU。背景建模的 `backend: auto` 会自动落到 CPU。
+旧 interim / GPU 镜像带 CUDA，无显卡时可能提示此信息。新的 CPU 镜像不含 CUDA，
+背景建模的 `backend: auto` 会使用 CPU。
 
 **`ModuleNotFoundError: No module named 'src'`**
 用了裸 `pytest` 或没经过 `scripts/dr.sh`。`PYTHONPATH=/workspace` 由该脚本注入。

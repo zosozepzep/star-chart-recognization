@@ -2,7 +2,7 @@
 """教程 02：探测 → 配准 → 双坐标系目标判决（项目主链）。
 
 容器内运行：
-    SC_IMAGE=star-chart:cpu-interim bash scripts/dr.sh python examples/02_detect_register_target.py
+    bash scripts/dr.sh python examples/02_detect_register_target.py
 
 约 100 秒（4096² 单帧背景建模 1.48 s，55 帧探测是主要开销）。
 输出应与 docs/reports/measurements.md「配准」「目标判决」两节逐位一致。

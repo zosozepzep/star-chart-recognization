@@ -2,7 +2,7 @@
 """教程 07：出 8 张成果图（用真实数据，不用测试夹具）。
 
 容器内运行：
-    SC_IMAGE=star-chart:cpu-interim bash scripts/dr.sh python examples/07_figures.py
+    bash scripts/dr.sh python examples/07_figures.py
 
 约 3 分钟（含一次完整主链 + 一次 6 帧阈值扫描的最小版）。PNG 落在 output/figures/。
 
@@ -64,17 +64,20 @@ print("主链完成 t=%.1fs" % (time.time() - t0))
 
 truth = load_truth(seq.truth_path)
 report = compare(track, truth, seq, reg)
-_, rows = match_frames(truth, seq, track.frames)
-zp = zero_point_from_truth(track.flux[:len(rows)], truth.mag[rows])
+matched_frames, rows = match_frames(truth, seq, track.frames)
+flux_by_frame = dict(zip(track.frames, track.flux))
+zp = zero_point_from_truth([flux_by_frame[int(f)] for f in matched_frames], truth.mag[rows])
 traj = build_trajectory(track, seq, SCALE)
 orbit = estimate_from_trajectory(traj, seq.headers)
 
 # 图 1：原图 + 探测源，叠加目标位置与热像素簇
 img30 = seq.image(30)
 model30 = model_background(img30)
-table30 = detect_sources_in_frame(img30, model30, n_sigma=5.0, npixels=5, frame=30)
+table30 = detect_sources_in_frame(img30, model30, n_sigma=5.0, npixels=5, frame=30,
+                                  hot_clusters=hpm.clusters)
+target30 = tuple(track.xy_det[track.frames.index(30)]) if 30 in track.frames else None
 F.plot_detections(img30, table30, OUT / "fig1-detections.png",
-                  target_xy=tuple(verdict.to_dict()["xy_end"]),
+                  target_xy=target30,
                   hot_clusters=list(hpm.clusters))
 print("图 1 探测叠加            t=%.1fs" % (time.time() - t0))
 

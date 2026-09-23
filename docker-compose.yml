@@ -14,6 +14,7 @@ services:
     command: tail -f /dev/null
 
   gpu:
+    profiles: [gpu]
     build:
       context: .
       dockerfile: docker/Dockerfile.gpu

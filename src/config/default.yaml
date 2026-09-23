@@ -21,7 +21,7 @@ hotpixel:
   max_frames: 40            # 时间轴统计所用最大帧数（内存约束）
 
 detect:
-  report_n_sigma: 5.0       # 对外报数（复现率 90.3%）
+  report_n_sigma: 5.0       # 对外报数；复现率依数据与核验窗口而定，见 measurements.md
   search_n_sigma: 4.0       # 目标搜索（弱帧 flux 仅 264）
   npixels: 5
   aperture_radius_px: 5.0
@@ -65,6 +65,59 @@ repeatability:
   sigmas: [2.0, 2.5, 3.0, 3.5, 4.0, 4.5, 5.0, 6.0, 8.0]
   match_radius_px: 3.0
   frames: 6                 # 参与复现率统计的帧数
+
+star_report:
+  min_hits: 4               # 默认 6 帧中至少 4 帧；互为最近邻，包含指定图像本身
+
+# Validated telemetry selects this branch automatically; ground defaults above
+# remain available for the historical examples.
+space:
+  metadata_rows: 1
+  invalid_margin_px: 8      # Exclude apertures near negative/saturated pixels.
+  saturation_adu: 30000
+  star_max_elongation: 2.0
+  registration:
+    max_sources: 250        # Bounds the quadratic vote cost in a dense field.
+    max_elongation: 1.8
+    max_npixels: 200
+    min_inliers: 30
+    match_radius_px: 2.0
+    clip_floor_px: 0.2
+    max_rms_px: 0.5
+  motion:
+    stationary_radius_px: 2.0
+    stationary_min_hits: 4
+    min_peak_adu: 80.0
+    max_npixels: 2000
+    link_radius_px: 3.0
+    min_track_frames: 4
+    max_gap_frames: 2
+    min_speed_px_s: 1.0
+    max_speed_px_s: 150.0
+    max_rms_px: 1.5
+  trail_check:
+    threshold_sigma: 3.0
+    max_half_window_px: 200
+    resolved_length_px: 6.0
+    min_length_ratio: 0.35
+    max_length_ratio: 2.5
+    min_direction_cosine: 0.8
+    min_consistent_fraction: 0.5
+
+catalog_match:
+  seed_image_stars: 100
+  seed_catalog_stars: 200
+  max_image_stars: 2000
+  triangle_tolerance: 0.002
+  min_scale_arcsec_px: 0.5
+  max_scale_arcsec_px: 60.0
+  initial_radius_px: 2.5
+  min_initial_matches: 12
+  early_stop_matches: 40
+  min_matches: 30
+  clip_floor_arcsec: 1.0
+  max_astrometric_rms_arcsec: 3.0
+  max_photometric_scatter_mag: 0.5
 
 orbit:
   bracket_km: [200.0, 40000.0]

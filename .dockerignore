@@ -1,0 +1,6 @@
+# Images contain dependencies; source and data are mounted at runtime.
+**
+!requirements.txt
+!docker/
+!docker/Dockerfile.cpu
+!docker/Dockerfile.gpu

@@ -18,6 +18,20 @@ __pycache__/
 # 本地临时探针脚本
 _probe/
 
+# Local investigation, caches and generated source archives
+/probe/
+/.superpowers/
+/.pytest_cache/
+/.venv/
+/dist/
+/archive/
+/suite.xml
+/diagnostic_plot.png
+
 # 根目录散落的截图（只忽略这两张已存在的，避免误伤后续真正的 .jpg 交付物）
 /6450bce94089fb0df8ebe208f40351df.jpg
 /86fd4be6b5739080a7bdca03a55b630e.jpg
+
+# Payment receipts remain local after moving into chores/.
+/chores/6450bce94089fb0df8ebe208f40351df.jpg
+/chores/86fd4be6b5739080a7bdca03a55b630e.jpg

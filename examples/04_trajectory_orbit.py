@@ -2,7 +2,7 @@
 """教程 04：派生数据集 1 与 2 —— 目标轨迹角速度、圆轨道高度反演。
 
 容器内运行：
-    SC_IMAGE=star-chart:cpu-interim bash scripts/dr.sh python examples/04_trajectory_orbit.py
+    bash scripts/dr.sh python examples/04_trajectory_orbit.py
 
 约 110 秒。
 

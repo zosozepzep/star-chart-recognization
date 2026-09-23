@@ -2,7 +2,7 @@
 """教程 05：派生数据集 4 与 5 —— 传感器健康报告、观测条件量化。
 
 容器内运行：
-    SC_IMAGE=star-chart:cpu-interim bash scripts/dr.sh python examples/05_sensor_seeing.py
+    bash scripts/dr.sh python examples/05_sensor_seeing.py
 
 约 60 秒。这一步不需要真值（除天光面亮度用到零点），两个历元都能跑。
 """

@@ -1,2 +1,5 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+*.sh text eol=lf
+# Preserve the published reference catalog checksum on every platform.
+docs/reference/rst19-gaia-dr3.csv -text whitespace=cr-at-eol
