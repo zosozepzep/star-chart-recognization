@@ -79,8 +79,11 @@ def analyze_space_sequence(sequence, config, *, reference_frame=None, frame_rang
                                 background_adu=float(np.median(model.background)),
                                 noise_rms_adu=float(np.median(model.rms))))
         logger.info('天基分析 %d/%d：f%d，%d 个搜索源', n, len(frames), f, len(table))
+    logger.info('阶段：恒星背景配准')
     registration = register_star_field(tables, frames, conf['registration'])
+    logger.info('阶段：多帧运动关联')
     targets, candidate_counts = find_space_targets(tables, frames, registration, times, conf['motion'])
+    logger.info('阶段：曝光拖尾核验（%d 条初步轨迹）', len(targets))
     targets, rejected = check_tracks(sequence, targets, conf['trail_check'])
     return DetectionRun(frames, reference, tables, rates, stars, raw_count, registration, targets,
                         dict(mode='space', per_frame=diagnostics, motion_candidates=candidate_counts,

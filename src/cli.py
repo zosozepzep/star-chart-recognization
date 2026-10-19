@@ -93,6 +93,7 @@ def run_analysis(args):
     zp, note = None, "未请求真值定标；仅输出仪器星等。"
     catalog_fit = None
     if getattr(args, 'catalog', None):
+        logging.getLogger('src.space_pipeline').info('阶段：离线星表匹配与测光定标')
         from src.astrometry.catalog_match import calibrate_catalog
         auxiliary = getattr(sequence.headers[run.reference_frame], 'space_aux', None)
         if auxiliary is None:
@@ -170,11 +171,19 @@ def run_analysis(args):
     write_csv(output / "targets.csv", target_rows,
               ["target_id", "frame", "time_utc", "x_det", "y_det", "x_sky_px", "y_sky_px", "aperture_flux_adu_per_s"])
     if not args.no_plot:
+        logging.getLogger('src.space_pipeline').info('阶段：结果出图与导出')
         from src.viz.contest import plot_star_catalog
         plot_star_catalog(sequence.image(run.reference_frame), catalog, output / "faintest-star.png")
         if getattr(sequence, 'observation_mode', 'ground') == 'space':
             from src.viz.contest import plot_motion_tracks
             plot_motion_tracks(sequence, run, output / 'motion-tracks.png')
+    if getattr(args, 'viewer', False):
+        from src.viz.viewer import export_viewer
+        report['viewer'] = export_viewer(sequence, run, output)
+    report['total_seconds'] = time.perf_counter() - started
+    report['timing_note'] = 'analysis_seconds 不含出图；total_seconds 包含出图和浏览预览，不含进程/容器启动。'
+    (output / 'report.json').write_text(json.dumps(json_safe(report), ensure_ascii=False, indent=2,
+                                                  allow_nan=False) + '\n', encoding='utf-8')
     print(json.dumps({"output": str(output), "target_count": len(verdicts),
                       "detected_sources": run.raw_star_count,
                       "confirmed_stars": catalog["n_confirmed_stars"],
@@ -193,6 +202,7 @@ def main(argv=None):
     parser.add_argument('--catalog', type=Path, help='本地 Gaia 参考 CSV；识别后匹配并给出有来源的近似星等')
     parser.add_argument("--no-plot", action="store_true", help="仅导出 CSV / JSON")
     parser.add_argument("--verbose", action="store_true", help="显示各模块的详细日志")
+    parser.add_argument('--viewer', action='store_true', help='导出原图预览、逐帧坐标和候选切片供离线交互界面使用')
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO if args.verbose else logging.WARNING, format="%(levelname)s %(message)s")
     logging.getLogger("src.pipeline").setLevel(logging.INFO)

@@ -24,6 +24,10 @@ class SourceArchiveTests(unittest.TestCase):
         for name in SOURCE_DIRS:
             (self.root / name).mkdir(parents=True, exist_ok=True)
         (self.root / "src" / "main.py").write_text("print('hello')\n", encoding="utf-8")
+        web = self.root / 'src' / 'web'
+        web.mkdir()
+        for name in ('index.html', 'app.js', 'style.css'):
+            (web / name).write_text('asset', encoding='utf-8')
 
     def test_sources_and_manifest_exclude_data_output_and_local_material(self):
         for name in ("data/images/secret.fits", "output/preview.png", ".git/config",
@@ -37,6 +41,8 @@ class SourceArchiveTests(unittest.TestCase):
             prefix = "star-chart-recognization/"
             names = {name.removeprefix(prefix) for name in archive.namelist()}
             self.assertIn("src/main.py", names)
+            for name in ('index.html', 'app.js', 'style.css'):
+                self.assertIn('src/web/' + name, names)
             self.assertIn("data/images/.gitkeep", names)
             self.assertNotIn("data/images/secret.fits", names)
             self.assertNotIn("output/preview.png", names)

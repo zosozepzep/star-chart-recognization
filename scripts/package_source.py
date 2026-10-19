@@ -19,7 +19,7 @@ TOP_FILES = (
     "requirements.txt", "pytest.ini", "docker-compose.yml",
 )
 SOURCE_DIRS = {
-    "src": {".py", ".yaml"},
+    "src": {".py", ".yaml", ".html", ".css", ".js"},
     "tests": {".py"},
     "examples": {".py"},
     "scripts": {".py", ".sh", ".ps1"},
@@ -47,13 +47,15 @@ def source_files(root: Path) -> list[Path]:
     return sorted(set(files), key=lambda p: p.relative_to(root).as_posix())
 
 
-def build_archive(root: Path, destination: Path, max_bytes: int = MAX_BYTES) -> dict:
+def build_archive(root: Path, destination: Path, max_bytes: int = MAX_BYTES, *, release_info=None) -> dict:
     files = source_files(root)
     if destination.exists():
         raise FileExistsError(f"Archive already exists; choose another --output: {destination}")
     entries = {p.relative_to(root).as_posix(): p.read_bytes() for p in files}
     # Keep documented mount points even when the organizer supplies data separately.
     entries.update({"data/images/.gitkeep": b"", "output/.gitkeep": b""})
+    if release_info is not None:
+        entries['RELEASE.json'] = (json.dumps(release_info, ensure_ascii=False, indent=2, allow_nan=False)+'\n').encode('utf-8')
     manifest = {
         "format": 1,
         "size_limit_bytes": max_bytes,

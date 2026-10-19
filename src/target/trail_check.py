@@ -64,5 +64,6 @@ def check_tracks(sequence, targets, config):
         if fraction >= config['min_consistent_fraction']:
             accepted.append(verdict)
         else:
-            rejected.append(verdict.to_dict())
+            rejected.append({**verdict.to_dict(), 'is_target': False,
+                             'reasons': ['曝光拖尾与帧间运动不相容，未通过物理核验']})
     return accepted, rejected

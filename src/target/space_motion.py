@@ -20,6 +20,8 @@ class MotionVerdict:
     trail_evidence: dict | None = None
 
     def to_dict(self):
+        span = self.track.end - self.track.start + 1
+        gaps = np.diff(self.track.frames) - 1
         return dict(is_target=True, method='registered linear motion with gap tolerance',
                     frames=[self.track.start, self.track.end], n_frames=self.track.length,
                     velocity_sky_px_per_s=self.velocity.tolist(),
@@ -27,7 +29,11 @@ class MotionVerdict:
                     fit_rms_px=self.rms_px, time_span_s=self.time_span_s,
                     xy_start=self.track.xy_det[0].tolist(), xy_end=self.track.xy_det[-1].tolist(),
                     reasons=['相对恒星背景运动，多帧独立检出，时间序列线性拟合通过'],
-                    identity='unidentified moving-source candidate', trail_evidence=self.trail_evidence)
+                    identity='unidentified moving-source candidate', trail_evidence=self.trail_evidence,
+                    temporal_evidence=dict(observed_frames=self.track.length, span_frames=span,
+                                           missing_frames=span - self.track.length,
+                                           coverage_fraction=self.track.length / span,
+                                           max_consecutive_missing=int(gaps.max()) if len(gaps) else 0))
 
 
 def fit_motion(times, xy):

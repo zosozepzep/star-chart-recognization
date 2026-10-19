@@ -35,6 +35,6 @@ if (-not (Test-DockerCommand @('image', 'inspect', $imageName))) {
         throw "Image not found: $imageName. Build with: docker build -f docker/Dockerfile.cpu -t star-chart:cpu ."
     }
 }
-& docker run --rm -v "${projectRoot}:/workspace" -w /workspace `
+& docker run --rm --pull=never --network none -v "${projectRoot}:/workspace" -w /workspace `
     -e PYTHONPATH=/workspace -e MPLBACKEND=Agg $imageName @args
 exit $LASTEXITCODE

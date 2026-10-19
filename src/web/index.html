@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>AstraVision · 星图识别工作台</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath d='M16 2v28M2 16h28M6 6l20 20M6 26L26 6' stroke='%23285f51' fill='none'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/style.css"><script src="/app.js" defer></script>
+</head>
+<body>
+<header class="masthead">
+  <a class="brand" href="/" aria-label="AstraVision 首页"><span class="brand-mark" aria-hidden="true">✳</span><span>Astra<span class="brand-light">Vision</span><small>星图识别与观测分析</small></span></a>
+  <nav aria-label="工作区"><button class="nav active" id="observeTab">观测工作台</button><button class="nav" id="validationTab">算法验证</button></nav>
+  <div class="local-state"><span class="status-dot"></span> 本地离线工作台 <span class="edition">NATIONAL / 2026</span></div>
+</header>
+<div class="app-shell">
+<aside class="sidebar">
+  <div class="section-heading"><span>01 / OBSERVATION</span><span class="tiny-orbit">◌</span></div>
+  <h1>从星场中，<br>寻找运动的光。</h1>
+  <p class="intro">选择观测序列，运行识别，逐条检查候选目标的时空证据。</p>
+  <form id="runForm">
+    <label for="dataset">观测数据集</label><select id="dataset" required></select>
+    <div class="input-row"><div><label for="reference">指定图像</label><select id="reference" required></select></div><div class="frame-count"><span id="frameCount">—</span><small>帧 / 序列</small></div></div>
+    <p id="referenceName" class="filename">正在读取数据目录…</p>
+    <label class="checkbox-label"><input type="checkbox" id="catalog" checked> 使用离线 Gaia DR3 星表定标</label>
+    <button class="primary" id="startButton" type="submit"><span>开始识别</span><span aria-hidden="true">↗</span></button>
+  </form>
+  <div class="run-state" aria-live="polite"><div><span id="runState">准备就绪</span><strong id="elapsed">00:00</strong></div><p id="runStage">选择帧号后，运行完整识别流程。</p><button id="stopButton" class="text-button" hidden>停止当前任务</button></div>
+  <details class="log-panel"><summary>查看运行日志 <span>↗</span></summary><pre id="logs">尚未启动本次运行。</pre></details>
+  <div class="history"><div class="section-heading"><span>02 / ARCHIVE</span><button id="refreshHistory" class="icon-button" aria-label="刷新运行记录">↻</button></div><label for="history">打开已保存的运行结果</label><select id="history"><option value="">选择运行记录</option></select><p>历史结果会明确标注；现场识别始终创建新的运行记录。</p></div>
+  <div class="sidebar-foot"><span class="status-dot"></span><span id="runtime">CPU · OFFLINE</span><span>0-based 坐标</span></div>
+</aside>
+<main>
+  <div id="notice" class="notice" role="alert" hidden></div>
+  <section id="observationPanel">
+    <div class="page-title"><div><span class="eyebrow">ASTROMETRIC OBSERVATORY</span><h2>观测全景 <span id="resultBadge" class="badge">等待识别</span></h2></div><p id="resultSource">真实图像 · 多帧关联 · 物理核验</p></div>
+    <div class="metrics">
+      <article><span>跨帧恒星候选</span><strong id="starCount">—</strong><small id="starDescription">指定图像内通过核验的候选</small></article>
+      <article><span>运动候选轨迹</span><strong id="targetCount">—</strong><small>身份未定 · 可逐条查看证据</small></article>
+      <article><span>最暗候选星等</span><strong id="magnitude">—</strong><small id="magnitudeDescription">Gaia G 参照估计</small></article>
+      <article><span>配准残差中位数</span><strong id="registrationRms">—</strong><small>参考恒星背景 · px</small></article>
+    </div>
+    <div class="observation-grid">
+      <section class="sky-panel" aria-label="星场图像与候选轨迹">
+        <div class="sky-toolbar"><span><i class="status-dot"></i> <b id="skyLabel">IMAGE / —</b></span><div><label><input type="checkbox" id="showStars"> 恒星</label><label><input type="checkbox" id="showTracks" checked> 轨迹</label><button id="resetView" aria-label="重置图像缩放">适应</button></div></div>
+        <div class="canvas-wrap"><canvas id="sky" tabindex="0" aria-label="星场交互视图；滚轮缩放、拖动平移，点击轨迹选择目标"></canvas><div id="emptyState" class="empty-state"><span class="reticle" aria-hidden="true"></span><h3>等待第一束信号</h3><p>启动一次识别，或打开已保存结果。</p></div><span class="canvas-tag" id="canvasTag">FITS / DETECTOR COORDINATES</span><div class="zoom-buttons"><button id="zoomIn" aria-label="放大图像">+</button><button id="zoomOut" aria-label="缩小图像">−</button></div></div>
+        <div class="timeline"><button id="playButton" aria-label="播放或暂停轨迹">▶</button><input id="timeline" aria-label="轨迹观测帧" type="range" min="0" max="14" value="7"><span id="timelineLabel">f7</span></div>
+        <p class="canvas-caption" id="canvasCaption">原始图像用于测量；预览仅做显示拉伸。滚轮缩放 · 拖动平移 · 点击轨迹。</p>
+      </section>
+      <aside class="target-detail">
+        <div class="section-heading"><span>TRACK INSPECTOR</span><span class="green-dot"></span></div>
+        <div class="target-title"><h3 id="selectedTitle">候选详情</h3><span class="badge">运动候选</span></div>
+        <p id="targetSummary" class="muted">从下方列表或星场中选择一条轨迹。</p>
+        <dl id="evidence" class="evidence"><div><dt>有效观测</dt><dd>—</dd></div><div><dt>拟合残差</dt><dd>—</dd></div><div><dt>相对运动速度</dt><dd>—</dd></div><div><dt>拖尾相容比例</dt><dd>—</dd></div></dl>
+        <div class="mini-title">原图切片 <span>首 / 中 / 末次观测</span></div><div id="cutouts" class="cutouts"><p class="muted">运行后显示独立时刻的图像证据。</p></div>
+        <div class="mini-title">孔径流量 <span>ADU / s</span></div><svg id="fluxChart" viewBox="0 0 280 90" aria-label="候选轨迹孔径流量变化" role="img"></svg><p class="footnote">长拖尾可能超出固定孔径；此曲线不代表完整目标光度。</p>
+      </aside>
+    </div>
+    <section class="catalog-panel">
+      <div class="table-heading"><div><span class="eyebrow">MOTION CATALOG</span><h3>候选轨迹目录 <span id="tableCount">/ 0</span></h3></div><div class="downloads" id="downloads"></div></div>
+      <div class="table-scroll"><table><thead><tr><th>编号</th><th>观测帧数</th><th>速度 px/s</th><th>拟合 RMS px</th><th>拖尾相容</th><th>观测区间</th></tr></thead><tbody id="tracksBody"><tr><td colspan="6" class="table-empty">运行结果将在这里列出</td></tr></tbody></table></div>
+    </section>
+    <details class="science-notes"><summary>测量口径与数据来源</summary><div id="scienceNotes">尚未加载结果。</div></details>
+    <div class="image-links" id="imageLinks"></div>
+  </section>
+  <section id="validationPanel" hidden>
+    <div class="page-title"><div><span class="eyebrow">EVIDENCE BEFORE CLAIMS</span><h2>算法验证</h2></div><span class="badge">受控合成实验</span></div>
+    <div class="validation-intro"><span class="experiment-icon" aria-hidden="true">⊙</span><div><h3>每个判据，都应有可重复的对照。</h3><p>从合成图像重新检测、配准和关联。固定随机种子，对比完整方法、移除拖尾核验、移除漏帧容忍；记录命中、误报与漏检。</p><button id="benchmarkButton" class="primary">运行验证实验 <span aria-hidden="true">↗</span></button></div></div>
+    <p class="validation-warning">这里的准确率与召回率仅属于合成场景，不能代替官方数据的真值评测。弱源场景保留生产阈值，用于暴露方法边界。</p>
+    <div id="benchmarkResults" class="benchmark-results"><div class="placeholder">启动验证实验，或从左侧运行记录中选择已有实验。</div></div>
+  </section>
+</main>
+</div>
+<footer>AstraVision <span>观测有据，识别有迹。</span><span>星图识别工作台 / 国赛演示版</span></footer>
+</body>
+</html>

@@ -20,13 +20,13 @@ def test_inference_has_no_transitive_truth_dependency():
                 imports.add(base)
                 imports.update(base + "." + a.name for a in node.names)
         graph[module] = imports
-    protected = {"src.pipeline", "src.analysis.star_catalog", "src.validate.repeatability"}
+    protected = {"src.pipeline", "src.space_pipeline", "src.analysis.star_catalog", "src.validate.repeatability"}
     protected.update(m for m in graph if m.startswith(("src.detect", "src.register", "src.target")))
     for entry in protected:
         seen, pending = set(), [(entry, [entry])]
         while pending:
             module, chain = pending.pop()
-            assert module != "src.validate.truth", " -> ".join(chain)
+            assert module not in {"src.validate.truth", "src.validate.benchmark", "src.validate.injection", "src.validate.injection_review", "src.validate.trail_experiment"}, " -> ".join(chain)
             if module not in seen:
                 seen.add(module)
                 pending.extend((dep, chain + [dep]) for dep in graph.get(module, ()) if dep in graph)

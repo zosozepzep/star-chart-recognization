@@ -1,5 +1,17 @@
 # 源码提交与运行环境
 
+## 2026-10-18 最终发行
+
+当前正式版为 `national-final-20261018`，交付文件位于 `dist/final-20261018/`：
+源码 ZIP 与完整离线演示 ZIP 分开，源码包继续限制在 200 MB 内。
+完整包包含官方数据和 CPU 镜像，解压后运行 `start.ps1`；源码包需要另配数据与镜像。
+`RELEASE.json` 和 `SOURCE_MANIFEST.json` 用于启动前核验。
+大小、校验值和解压复验结果见发行目录的 `release-receipt.json`。
+使用说明见 [`最终演示手册`](final-demo.md)，本轮验证见 [`最终版验收`](reports/final-release-2026-10-18.md)。
+
+下面保留通用打包方法与此前交付记录。重新制作最终版应使用
+`python -m scripts.build_final_release --output <新的空发行目录>`，在测试与实跑完成后执行。
+
 ## 提交包
 
 源码压缩后上限为 **200 MB**。在项目根目录执行（仅使用 Python 标准库）：
@@ -32,8 +44,8 @@ python scripts/package_source.py
 ```
 
 参考 Gaia 星表已随源码提供，运行阶段不需要网络。输出包含两份 CSV、JSON 报告、
-最暗候选标注和运动轨迹图。当前交付使用 `dist/star-chart-source.zip`，
-验收信息见 `dist/submission-receipt.json`。此前三个版本及其原始回执统一存放于
+最暗候选标注和运动轨迹图。2026-09-23 交付使用 `dist/star-chart-source.zip`，
+其历史验收信息见 `dist/submission-receipt.json`。此前三个版本及其原始回执统一存放于
 `dist/history/2026-09-23-pre-cleanup/`，旧文件内容和校验值保持不变。
 每次选择空输出目录；重新打包时另选不存在的文件名。
 

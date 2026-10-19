@@ -36,7 +36,7 @@ if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
   fi
 fi
 
-MSYS_NO_PATHCONV=1 exec docker run --rm \
+MSYS_NO_PATHCONV=1 exec docker run --rm --pull=never --network none \
   -v "${host}:/workspace" \
   -w /workspace \
   -e PYTHONPATH=/workspace \

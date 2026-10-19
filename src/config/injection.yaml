@@ -1,0 +1,12 @@
+# Predeclared real-background experiment; never loaded by production inference.
+crop_size: 768
+tuning_seeds: [41, 137, 809]
+holdout_seeds: [1709, 2027, 4093]
+fluxes_adu: [600.0, 1800.0, 5400.0]  # Integrated signal per exposure, not magnitude.
+speeds_px_s: [2.0, 6.0, 12.0]      # Detector coordinates.
+peak_thresholds_adu: [40.0, 60.0, 80.0]
+psf_sigma_px: 1.15
+psf_support_sigma: 6.0
+trail_samples_per_px: 2.0
+edge_margin_px: 24.0
+match_radius_px: 3.0
