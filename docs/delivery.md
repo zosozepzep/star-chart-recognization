@@ -1,16 +1,19 @@
 # 源码提交与运行环境
 
-## 2026-10-18 最终发行
+## 2026-10-20 CPU 并行发行
 
-当前正式版为 `national-final-20261018`，交付文件位于 `dist/final-20261018/`：
+当前正式版为 `national-cpu-parallel-20261020`，交付文件位于 `dist/cpu-parallel-20261020/`：
 源码 ZIP 与完整离线演示 ZIP 分开，源码包继续限制在 200 MB 内。
 完整包包含官方数据和 CPU 镜像，解压后运行 `start.ps1`；源码包需要另配数据与镜像。
 `RELEASE.json` 和 `SOURCE_MANIFEST.json` 用于启动前核验。
 大小、校验值和解压复验结果见发行目录的 `release-receipt.json`。
-使用说明见 [`最终演示手册`](final-demo.md)，本轮验证见 [`最终版验收`](reports/final-release-2026-10-18.md)。
+使用说明见 [`最终演示手册`](final-demo.md)，本轮验证见 [`CPU 并行实测`](reports/cpu-parallel-2026-10-20.md)。
+本机旧镜像已更新，新增依赖 `threadpoolctl==3.6.0`；完整包固定升级镜像的 ID。
+上一版源码、完整 ZIP 及原始回执保留在 `archive/releases/final-20261018/`，不再保留重复的解压副本。
 
 下面保留通用打包方法与此前交付记录。重新制作最终版应使用
-`python -m scripts.build_final_release --output <新的空发行目录>`，在测试与实跑完成后执行。
+`python -m scripts.build_final_release --output <新的空发行目录> --version national-cpu-parallel-20261020`，在测试与实跑完成后执行。
+此命令生成源码 ZIP 与 `offline-kit/`，完整 ZIP 的清单与解压复验步骤见 [本次交付](reports/release-cpu-parallel-2026-10-20.md)。
 
 ## 提交包
 

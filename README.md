@@ -1,12 +1,14 @@
 # 太空目标识别系统
 
+**CPU 并行版：`national-cpu-parallel-20261020`。** 天基与地基主流程支持多进程 / 多线程逐帧计算，默认自动选择最多 4 个进程；命令行可设 `--workers 4 --executor process`，网页也可选择数量和方式。使用方法与资源说明见 [CPU 并行识别](docs/cpu-parallel.md)。
+
 处理官方天基图像与历史地基 FITS 序列，输出星点候选、星等估计和运动轨迹。
 
-**国赛最终版已冻结：`national-final-20261018`。** 完整离线包解压后执行 `start.ps1`，
+**当前交付位于 `dist/cpu-parallel-20261020/`。** 完整离线包解压后执行 `start.ps1`，
 启动器校验源码、官方数据与固定 CPU 镜像。正式流程保留 80 ADU 门限，重定位作为实验工具交付。
-本机网页识别约 88.5 秒；全仓库测试 592 项通过、46 项因历史数据/TLE/GPU 条件缺失而跳过、0 失败。
-交付包位于 `dist/final-20261018/`，操作见 [`最终演示手册`](docs/final-demo.md)，
-验证范围见 [`最终版验收`](docs/reports/final-release-2026-10-18.md)。
+本机 4 进程分析与导出实测约 48.14 秒；全仓库测试 618 项通过、46 项因历史数据/TLE/GPU 条件缺失而跳过、0 失败。
+操作见 [`最终演示手册`](docs/final-demo.md)，性能与结果一致性见 [`CPU 并行实测`](docs/reports/cpu-parallel-2026-10-20.md)，
+打包与清理说明见 [`本次交付`](docs/reports/release-cpu-parallel-2026-10-20.md)。
 
 **第 19 届官方数据已适配**：将 15 张 FITS 放在 `data/rst19/`，执行：
 

@@ -22,6 +22,9 @@
     <div class="input-row"><div><label for="reference">指定图像</label><select id="reference" required></select></div><div class="frame-count"><span id="frameCount">—</span><small>帧 / 序列</small></div></div>
     <p id="referenceName" class="filename">正在读取数据目录…</p>
     <label class="checkbox-label"><input type="checkbox" id="catalog" checked> 使用离线 Gaia DR3 星表定标</label>
+    <label for="workers">CPU 并行数量</label><select id="workers"><option value="0">自动（最多 4）</option><option value="1">1 · 串行</option><option value="2">2</option><option value="4">4</option><option value="8">8</option></select>
+    <label for="executor" class="execution-label">CPU 执行方式</label><select id="executor"><option value="process">多进程（推荐）</option><option value="thread">多线程</option></select>
+    <p class="filename">大幅图像并行会增加内存占用，内存不足时请降低数量。</p>
     <button class="primary" id="startButton" type="submit"><span>开始识别</span><span aria-hidden="true">↗</span></button>
   </form>
   <div class="run-state" aria-live="polite"><div><span id="runState">准备就绪</span><strong id="elapsed">00:00</strong></div><p id="runStage">选择帧号后，运行完整识别流程。</p><button id="stopButton" class="text-button" hidden>停止当前任务</button></div>

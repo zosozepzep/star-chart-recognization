@@ -1,14 +1,14 @@
 # AstraVision 国赛最终版：启动与演示
 
-版本：`national-final-20261018`。比赛日期：2026 年 10 月 24 日。
+版本：`national-cpu-parallel-20261020`。比赛日期：2026 年 10 月 24 日。
 正式识别采用已验证的 80 ADU 流程，曝光拖尾重定位保留为实验工具。
 
 ## 拿到交付文件后
 
 交付分成两个包：
 
-- `star-chart-source-national-final-20261018.zip`：源代码、前端、配置、离线 Gaia 星表、测试、运行脚本与报告；满足源码压缩包 200 MB 限制。
-- `star-chart-offline-national-final-20261018.zip`：完整演示包，包含上述程序、15 张官方 FITS、固定 CPU 镜像和验证证据；它与源码包分别提交，不适用源码包的 200 MB 限制。
+- `star-chart-source-national-cpu-parallel-20261020.zip`：源代码、前端、配置、离线 Gaia 星表、测试、运行脚本与报告；满足源码压缩包 200 MB 限制。
+- `star-chart-offline-national-cpu-parallel-20261020.zip`：完整演示包，包含上述程序、15 张官方 FITS、固定 CPU 镜像和验证证据；它与源码包分别提交，不适用源码包的 200 MB 限制。
 
 先在比赛电脑准备 **Windows、Python 3.11 或更新版本、Docker Desktop（Linux containers、x86-64）及浏览器**。
 Docker Desktop 必须已成功启动。首次安装这些软件需要提前完成；提供的 CPU 镜像可离线导入，
@@ -31,6 +31,10 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\start.ps1
 `runtime/star-chart-cpu.tar` 导入；校验失败会停止并说明原因。
 通过后，在浏览器打开 `http://127.0.0.1:8765`。占用该端口时用 `.\start.ps1 -Port 8767`。
 结束演示按服务器窗口中的 Ctrl+C。
+
+CPU 默认自动选择最多 4 个进程。可在网页选择并行数量和执行方式；内存较小的设备建议先试 1 或 2。
+本机 15 帧完整分析与出图导出从串行 90.76 秒降为 4 进程 48.14 秒，4 线程反而需要 172.01 秒，
+因此优先使用多进程。性能需在比赛电脑实测；更多说明见 `docs/cpu-parallel.md`。
 
 不修改 `src/`、`scripts/`、配置或随包星表。运行结果写入 `app/star-chart-recognization/output/`，
 允许新增结果，不影响源码校验。要改进算法，应复制到开发目录，重新验证后制作新版本。
@@ -55,7 +59,8 @@ f7 的已验证参考结果为 **12,842 个跨帧恒星候选、26 条运动候�
 固定孔径可能漏掉长拖尾流量，右侧曲线也不能当作完整目标的精密光变曲线。
 
 现场时间以比赛电脑实际排练为准。开发机计时和准确启动到导出的记录见
-`docs/reports/final-release-2026-10-18.md`；不要把一次开发机运行当作所有机器的性能保证。
+`docs/reports/cpu-parallel-2026-10-20.md`；上一版网页启动至导出的记录见
+`docs/reports/final-release-2026-10-18.md`。不要把一次开发机运行当作所有机器的性能保证。
 
 ## 故障与备用路径
 

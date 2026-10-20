@@ -12,6 +12,7 @@ from src.detect.centroid import aperture_flux
 from src.detect.segmentation import SourceTable, detect_sources_in_frame
 from src.register.solver import register_sequence
 from src.target.dual_frame import find_targets
+from src.parallel import execution_plan, frame_input, map_frames, read_frame
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +28,7 @@ class DetectionRun:
     registration: object
     targets: list
     diagnostics: dict | None = None
+    execution: dict | None = None
 
     def target_flux_rates(self, track, frames) -> np.ndarray:
         """Join calibration rows by frame id and actual source coordinates."""
@@ -45,6 +47,30 @@ class DetectionRun:
 def _with_flux(table, flux):
     return SourceTable(frame=table.frame, x=table.x, y=table.y, flux=flux,
                        peak=table.peak, elongation=table.elongation, npix=table.npix)
+
+
+def _analyze_ground_frame(job):
+    source, frame, exposure, verify, config, clusters, reject_radius = job
+    image = read_frame(source)
+    det_cfg = config['detect']
+    radius = float(det_cfg['aperture_radius_px'])
+    model = model_background(image, **config['background'])
+    kw = dict(npixels=det_cfg['npixels'], hot_clusters=clusters,
+              reject_radius=reject_radius, frame=frame)
+    detected = detect_sources_in_frame(image, model, n_sigma=det_cfg['search_n_sigma'], **kw)
+    residual = model.subtract(image)
+    rates = aperture_flux(residual, detected.xy, radius=radius) / exposure
+    stars, raw_count = None, 0
+    if verify:
+        table = detect_sources_in_frame(image, model, n_sigma=det_cfg['report_n_sigma'], **kw)
+        raw_count = len(table)
+        # Truncated apertures make edge stars appear artificially faint.
+        ny, nx = image.shape
+        valid = ((table.x >= radius) & (table.x <= nx - 1 - radius) &
+                 (table.y >= radius) & (table.y <= ny - 1 - radius))
+        table = table.select(valid)
+        stars = _with_flux(table, aperture_flux(residual, table.xy, radius=radius))
+    return frame, detected, rates, stars, raw_count
 
 
 def analyze_sequence(sequence, config, *, reference_frame=None, frame_range=None) -> DetectionRun:
@@ -75,33 +101,25 @@ def analyze_sequence(sequence, config, *, reference_frame=None, frame_range=None
     exposures = [sequence.headers[f].exposure_s for f in frames]
     if any(not np.isfinite(e) or e <= 0 for e in exposures):
         raise ValueError("所有分析帧都必须有有效的正曝光时间")
+    plan = execution_plan(config, len(frames))
+    logger.info('CPU 执行：%s，%d 个工作单元', plan['executor'], plan['workers'])
     hot = dict(config["hotpixel"])
     reject_radius = hot.pop("reject_radius_px")
     hpm = build_from_sequence(sequence, frames, **hot)
-    det_cfg = config["detect"]
-    radius = float(det_cfg["aperture_radius_px"])
     detections, rates, stars = {}, {}, {}
     raw_count = 0
-    for step, frame in enumerate(frames, 1):
-        image = sequence.image(frame)
-        model = model_background(image, **config["background"])
-        kw = dict(npixels=det_cfg["npixels"], hot_clusters=hpm.clusters,
-                  reject_radius=reject_radius, frame=frame)
-        detected = detect_sources_in_frame(image, model, n_sigma=det_cfg["search_n_sigma"], **kw)
+    jobs = ((frame_input(sequence, f), f, sequence.headers[f].exposure_s,
+             f in verification, config, hpm.clusters, reject_radius) for f in frames)
+    for step, (frame, detected, flux_rates, frame_stars, count) in enumerate(
+            map_frames(_analyze_ground_frame, jobs, plan), 1):
         detections[frame] = detected
-        residual = model.subtract(image)
-        rates[frame] = aperture_flux(residual, detected.xy, radius=radius) / sequence.headers[frame].exposure_s
-        if frame in verification:
-            table = detect_sources_in_frame(image, model, n_sigma=det_cfg["report_n_sigma"], **kw)
+        rates[frame] = flux_rates
+        if frame_stars is not None:
+            stars[frame] = frame_stars
             if frame == reference:
-                raw_count = len(table)
-            # Truncated apertures make edge stars appear artificially faint.
-            ny, nx = image.shape
-            valid = ((table.x >= radius) & (table.x <= nx - 1 - radius) &
-                     (table.y >= radius) & (table.y <= ny - 1 - radius))
-            table = table.select(valid)
-            stars[frame] = _with_flux(table, aperture_flux(residual, table.xy, radius=radius))
+                raw_count = count
         logger.info("分析进度 %d/%d：f%d，%d 个搜索源", step, len(frames), frame, len(detected))
     registration = register_sequence(detections, frames, config=config["register"])
     targets = find_targets(detections, frames, registration, config=config["target"])
-    return DetectionRun(frames, reference, detections, rates, stars, raw_count, registration, targets)
+    return DetectionRun(frames, reference, detections, rates, stars, raw_count, registration, targets,
+                        execution=plan)

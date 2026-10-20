@@ -2,6 +2,9 @@ import json
 from pathlib import Path
 import threading
 import time
+import os
+import subprocess
+import sys
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
@@ -109,3 +112,62 @@ def test_worker_starts_with_empty_output_and_persists_success_receipt(tmp_path, 
     folder = tmp_path/'output'/started['run_id']
     assert (folder/'run.log').read_text(encoding='utf-8') == 'finished\n'
     assert console.runs()[0]['id'] == started['run_id']
+
+
+@pytest.mark.parametrize('runtime', ['local', 'docker'])
+def test_analysis_passes_parallel_options_to_cli(tmp_path, monkeypatch, runtime):
+    console = Console(tmp_path, runtime=runtime)
+    monkeypatch.setattr(console, 'datasets', lambda: [dict(id='data/test', frames=['one.fits'])])
+    monkeypatch.setattr('src.webapp.threading.Thread.start', lambda self: None)
+    job = console.start(dict(dataset='data/test', reference_frame=0, workers=3, executor='thread'))
+    command = job['command']
+    assert command[command.index('--workers') + 1] == '3'
+    assert command[command.index('--executor') + 1] == 'thread'
+
+
+@pytest.mark.parametrize('options', [{'workers': -1}, {'workers': True}, {'workers': '4'},
+                                    {'executor': 'invalid'}, {'executor': []}])
+def test_bad_parallel_options_cannot_launch_worker(tmp_path, monkeypatch, options):
+    console = Console(tmp_path)
+    monkeypatch.setattr(console, 'datasets', lambda: [dict(id='data/test', frames=['one.fits'])])
+    with pytest.raises(ValueError):
+        console.start(dict(dataset='data/test', reference_frame=0, **options))
+    assert console.status() is None
+    assert not (tmp_path/'output').exists()
+
+
+def test_stop_terminates_local_worker_and_its_child(tmp_path, monkeypatch):
+    script = tmp_path/'worker.py'
+    script.write_text("import subprocess, sys, time\n"
+                      "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
+                      "print(child.pid, flush=True)\ntime.sleep(60)\n", encoding='utf-8')
+    original_popen = subprocess.Popen
+    def launch(command, **kwargs):
+        if command[0] == sys.executable:
+            command = [sys.executable, str(script)]
+        return original_popen(command, **kwargs)
+    monkeypatch.setattr('src.webapp.subprocess.Popen', launch)
+    console = Console(tmp_path, runtime='local')
+    console.start({'kind': 'benchmark'})
+    try:
+        deadline = time.monotonic() + 10
+        while not console.status()['logs'] and time.monotonic() < deadline:
+            time.sleep(.02)
+        child_pid = int(console.status()['logs'][0])
+        process = console.process
+        assert process.poll() is None
+        console.stop()
+        while console.status()['state'] == 'stopping' and time.monotonic() < deadline:
+            time.sleep(.02)
+        assert console.status()['state'] == 'cancelled'
+        assert process.poll() is not None
+        if os.name == 'nt':
+            listing = subprocess.run(['tasklist', '/FI', f'PID eq {child_pid}', '/FO', 'CSV', '/NH'],
+                                     capture_output=True, text=True, check=True)
+            assert f'"{child_pid}"' not in listing.stdout
+        else:
+            child_stat = Path(f'/proc/{child_pid}/stat')
+            assert not child_stat.exists() or child_stat.read_text().split()[2] == 'Z'
+    finally:
+        if console.status()['state'] == 'running':
+            console.stop()

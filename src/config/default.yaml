@@ -1,6 +1,10 @@
 paths:
   output_root: output
 
+execution:
+  workers: 0                # 0 自动（最多 4），1 串行；大图并行会增加内存占用
+  executor: process         # process 多进程利用多核；thread 多线程共享内存
+
 segment:
   window: 5                 # 估计一个标准差所需的最少 ΔAZ 增量数；默认下被 min_length 吞并，仅 >=10 时才起作用
   std_threshold_deg: 0.05   # 稳定跟踪判据（数据集 B 实测 0.0144，见 docs/reports/measurements.md）

@@ -17,6 +17,7 @@ from src.analysis.star_catalog import star_catalog
 from src.config import load_config
 from src.dataio.fits_loader import FrameSequence
 from src.pipeline import analyze_sequence
+from src.parallel import execution_options
 
 
 class _PaddingWarningFilter(logging.Filter):
@@ -77,6 +78,14 @@ def write_csv(path, rows, fields):
 def run_analysis(args):
     started = time.perf_counter()
     config = load_config(args.config)
+    for name in ('workers', 'executor'):
+        value = getattr(args, name, None)
+        if value is not None:
+            options = config.setdefault('execution', {})
+            if not isinstance(options, dict):
+                raise ValueError('execution 必须为配置映射')
+            options[name] = value
+    execution_options(config)
     output = args.output
     if output.exists() and (not output.is_dir() or any(output.iterdir())):
         raise ValueError("输出目录已存在且非空，请指定新的 --output 以保留已有结果")
@@ -150,6 +159,7 @@ def run_analysis(args):
         "registration": run.registration.report(), "target_count": len(verdicts),
         "targets": verdicts, "star_catalog": catalog,
         "diagnostics": run.diagnostics,
+        "execution": run.execution,
     }
     if getattr(sequence, 'observation_mode', 'ground') == 'space':
         report['space_telemetry'] = [dict(frame=f, time_utc=sequence.headers[f].date_obs.isot,
@@ -198,6 +208,8 @@ def main(argv=None):
     parser.add_argument("--reference-frame", type=int, help="比赛指定图像的 0-based 时序编号，默认跟踪段中帧")
     parser.add_argument("--frames", type=int, nargs=2, metavar=("START", "END"), help="显式指定连续分析帧，包含 END")
     parser.add_argument("--config", type=Path, help="完整 YAML 配置，默认 src/config/default.yaml")
+    parser.add_argument('--workers', type=int, help='CPU 工作单元数：0 自动（最多 4），1 串行，2 及以上并行')
+    parser.add_argument('--executor', choices=['process', 'thread'], help='CPU 并行方式：process 多进程（默认），thread 多线程')
     parser.add_argument("--calibrate-from-truth", action="store_true", help="独立识别完成后，允许用 .DAT 拟合星等零点")
     parser.add_argument('--catalog', type=Path, help='本地 Gaia 参考 CSV；识别后匹配并给出有来源的近似星等')
     parser.add_argument("--no-plot", action="store_true", help="仅导出 CSV / JSON")
@@ -216,7 +228,7 @@ def main(argv=None):
     from src.viz.figures import FontUnavailable
     try:
         run_analysis(args)
-    except (ValueError, OSError, KeyError, NoTrackingSegment, RegistrationError, FontUnavailable) as exc:
+    except (ValueError, OSError, KeyError, RuntimeError, NoTrackingSegment, RegistrationError, FontUnavailable) as exc:
         parser.exit(1, f"分析未完成：{exc}\n请检查输入格式、配置及上方具体错误；天基辅助数据会自动校验，详见 docs/delivery.md。\n")
 
 

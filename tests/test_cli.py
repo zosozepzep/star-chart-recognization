@@ -4,6 +4,7 @@ import json
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
 from src import cli
 from src.detect.segmentation import SourceTable
@@ -11,7 +12,8 @@ from src.pipeline import DetectionRun
 from src.register.solver import RegistrationResult
 
 
-def test_no_targets_or_stars_exports_empty_tables_without_reading_truth(tmp_path, monkeypatch):
+@pytest.mark.parametrize('workers', [None, 2])
+def test_no_targets_or_stars_exports_empty_tables_without_reading_truth(tmp_path, monkeypatch, workers):
     frames = list(range(6))
     registration = RegistrationResult(0, frames, {f: np.eye(3) for f in frames})
     run = DetectionRun(frames, 0, {}, {}, {f: SourceTable.empty(f) for f in frames}, 0, registration, [])
@@ -22,19 +24,25 @@ def test_no_targets_or_stars_exports_empty_tables_without_reading_truth(tmp_path
         def __len__(self):
             return 6
     monkeypatch.setattr(cli.FrameSequence, "from_directory", lambda _: Sequence())
-    monkeypatch.setattr(cli, "analyze_sequence", lambda *a, **kw: run)
+    def analyze(sequence, config, **kwargs):
+        assert config['execution']['workers'] == (0 if workers is None else workers)
+        assert config['execution']['executor'] == 'thread'
+        return run
+    monkeypatch.setattr(cli, "analyze_sequence", analyze)
     def forbidden(*a):
         raise AssertionError("Default inference must not load truth")
     monkeypatch.setattr(cli, "calibrate_after_detection", forbidden)
     out = tmp_path / "results"
     args = argparse.Namespace(config=None, input=tmp_path, output=out, no_plot=True,
-                              reference_frame=0, frames=None, calibrate_from_truth=False)
+                              reference_frame=0, frames=None, calibrate_from_truth=False,
+                              workers=workers, executor='thread')
     cli.run_analysis(args)
     result = json.loads((out / "report.json").read_text(encoding="utf-8"))
     assert result["target_count"] == 0
     assert result["star_catalog"]["faintest_confirmed_star"] is None
     assert result["star_catalog"]["calibration"] is None
     assert result["registration"]["rms_max_px"] is None
+    assert result['config']['execution']['executor'] == 'thread'
     for name in ["stars.csv", "targets.csv"]:
         with (out / name).open(encoding="utf-8-sig") as fh:
             assert list(csv.DictReader(fh)) == []
@@ -48,3 +56,15 @@ def test_existing_results_are_not_overwritten(tmp_path):
     with pytest.raises(ValueError, match="非空"):
         cli.run_analysis(args)
     assert existing.read_text(encoding="utf-8") == "preserve"
+
+
+def test_cli_parses_parallel_arguments_and_rejects_negative_workers(tmp_path, monkeypatch):
+    captured = []
+    original = cli.run_analysis
+    monkeypatch.setattr(cli, 'run_analysis', captured.append)
+    cli.main(['--input', str(tmp_path), '--workers', '3', '--executor', 'thread', '--no-plot'])
+    assert captured[0].workers == 3 and captured[0].executor == 'thread'
+    monkeypatch.setattr(cli, 'run_analysis', original)
+    with pytest.raises(SystemExit) as error:
+        cli.main(['--input', str(tmp_path), '--workers', '-1', '--no-plot'])
+    assert error.value.code == 1

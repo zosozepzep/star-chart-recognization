@@ -47,7 +47,7 @@ $('history').onchange=()=>{ if($('history').value)loadResult($('history').value,
 async function start(kind) {
   notify('');
   try {
-    const job=await api('/api/start',{kind,dataset:$('dataset').value,reference_frame:Number($('reference').value),catalog:$('catalog').checked});
+    const job=await api('/api/start',{kind,dataset:$('dataset').value,reference_frame:Number($('reference').value),catalog:$('catalog').checked,workers:Number($('workers').value),executor:$('executor').value});
     showJob(job);
   } catch(e) { notify(e.message); }
 }
@@ -60,11 +60,12 @@ function showJob(job) {
   const busy=['running','stopping'].includes(job.state);
   $('startButton').disabled=busy || !state.datasets.length; $('benchmarkButton').disabled=busy;
   $('dataset').disabled=busy; $('reference').disabled=busy; $('catalog').disabled=busy;
+  $('workers').disabled=busy; $('executor').disabled=busy;
   $('stopButton').hidden=!busy; $('stopButton').disabled=job.state==='stopping';
   $('runState').textContent=({running:job.kind==='benchmark'?'验证实验运行中':'正在分析',stopping:'正在停止',succeeded:'运行完成',failed:'运行失败',cancelled:'任务已停止'})[job.state];
   $('elapsed').textContent=elapsed(job.elapsed_seconds);
   const lines=job.logs||[];
-  const stages=lines.filter(line=>/阶段：|天基分析|基准实验/.test(line));
+  const stages=lines.filter(line=>/阶段：|天基分析|分析进度|CPU 执行|基准实验/.test(line));
   $('runStage').textContent=busy?(stages.at(-1)||'启动计算环境，准备输入数据…'):(job.state==='succeeded'?(job.kind==='benchmark'?'本次验证实验已完成，计时包含环境启动。':'本次识别已完成，计时包含环境启动、识别与导出。'):'查看运行日志后可以重新启动。');
   $('logs').textContent=lines.join('\n')||'进程启动中…';
   $('logs').scrollTop=$('logs').scrollHeight;

@@ -16,12 +16,15 @@ from pathlib import Path
 import re
 import secrets
 import shutil
+import signal
 import subprocess
 import sys
 import threading
 import time
 from urllib.parse import parse_qs, urlparse
 import uuid
+
+from src.parallel import execution_options
 
 ROOT = Path(__file__).resolve().parents[1]
 STATIC = Path(__file__).with_name('web')
@@ -118,6 +121,9 @@ class Console:
                 if dataset is None or type(frame) is not int or not 0 <= frame < len(dataset['frames']):
                     raise ValueError('请选择有效的数据集和指定帧')
                 args = ['-m', 'src.cli', '--input', dataset['id'], '--reference-frame', str(frame), '--viewer']
+                workers, executor = execution_options({'execution': {
+                    'workers': request.get('workers', 0), 'executor': request.get('executor', 'process')}})
+                args += ['--workers', str(workers), '--executor', executor]
                 if request.get('catalog'):
                     args += ['--catalog', 'docs/reference/rst19-gaia-dr3.csv']
             else:
@@ -155,6 +161,7 @@ class Console:
                     self.process = subprocess.Popen(command, cwd=self.root, env=env,
                                                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                                     text=True, encoding='utf-8', errors='replace',
+                                                    start_new_session=os.name != 'nt',
                                                     creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0)
                     process = self.process
                 for line in process.stdout:
@@ -191,7 +198,18 @@ class Console:
             if self.runtime == 'docker':
                 subprocess.run(['docker', 'stop', '--time', '2', container], capture_output=True, timeout=15)
             else:
-                process.terminate()
+                # A CPU process pool has children: stop the entire local job.
+                if os.name == 'nt':
+                    stopped = subprocess.run(['taskkill', '/PID', str(process.pid), '/T', '/F'],
+                                             capture_output=True, timeout=15,
+                                             creationflags=subprocess.CREATE_NO_WINDOW)
+                    if stopped.returncode and process.poll() is None:
+                        raise OSError('无法停止本地计算进程树')
+                else:
+                    try:
+                        os.killpg(process.pid, signal.SIGTERM)
+                    except ProcessLookupError:
+                        pass
         return self.status()
 
     def artifact(self, run, name):

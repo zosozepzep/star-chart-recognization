@@ -6,7 +6,7 @@ import pytest
 
 from src.config import load_config
 
-CORE_MODULES = ["numpy", "scipy", "astropy", "photutils", "matplotlib", "pandas", "yaml"]
+CORE_MODULES = ["numpy", "scipy", "astropy", "photutils", "matplotlib", "pandas", "yaml", "threadpoolctl"]
 
 PACKAGES = [
     "src.dataio",
